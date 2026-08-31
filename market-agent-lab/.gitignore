@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Data & artifacts (synthetic data is regenerated, not committed)
+data_store/raw/*
+data_store/features/*
+data_store/models/*
+data_store/duckdb/*
+data_store/results/*
+!data_store/raw/.gitkeep
+!data_store/features/.gitkeep
+!data_store/models/.gitkeep
+!data_store/duckdb/.gitkeep
+!data_store/results/.gitkeep
+*.duckdb
+*.parquet
+
+# IDE
+.vscode/
+.idea/
