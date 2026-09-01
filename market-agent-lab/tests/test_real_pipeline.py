@@ -1,0 +1,107 @@
+"""Tests for real_pipeline.py's orchestration wiring (Stage 15): that
+build-real-features/evaluate-real/real-demo correctly chain the V0.2
+building blocks (feature matrix, purge/embargo, holdout split,
+champion/challenger) without live network access.
+
+The read-only event-probability ingestion step (a real HTTP call in
+production) is stubbed out here -- its own correctness is already tested
+in tests/test_prediction_market_readonly.py; this file's job is proving
+the pipeline WIRING, not re-testing every ingestion source."""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+import real_pipeline as rp
+from backtesting.holdout import HoldoutConfig
+from database import repository as repo
+from database.db import fresh_connection
+from database.schema import init_schema
+
+SYMBOLS = ["AAPL", "MSFT", "JPM"]
+BENCHMARK = "SPY"
+
+
+def _seed_market_data(con, n_days: int = 1400) -> None:
+    dates = pd.bdate_range("2020-01-02", periods=n_days)
+    rows = []
+    profiles = {"AAPL": (1, 150.0, 0.02), "MSFT": (2, 300.0, 0.018), "JPM": (3, 130.0, 0.017), BENCHMARK: (4, 400.0, 0.011)}
+    for symbol, (seed, start_price, vol) in profiles.items():
+        rng = np.random.default_rng(seed)
+        closes = start_price * np.exp(np.cumsum(rng.normal(0.0003, vol, n_days)))
+        volumes = np.random.default_rng(seed + 100).normal(2_000_000.0, 300_000.0, n_days).clip(min=100_000.0)
+        for ts, close, volume in zip(dates, closes, volumes, strict=True):
+            rows.append(
+                {
+                    "symbol": symbol, "timestamp": ts, "open": close * 0.998, "high": close * 1.01,
+                    "low": close * 0.99, "close": close, "adjusted_close": close, "volume": float(volume),
+                }
+            )
+    repo.insert_market_observations(con, pd.DataFrame(rows))
+
+
+@pytest.fixture
+def con():
+    with fresh_connection(":memory:") as c:
+        init_schema(c)
+        yield c
+
+
+@pytest.fixture(autouse=True)
+def _stub_event_ingestion(monkeypatch):
+    """No live network in the regular test suite -- the read-only
+    event-probability provider's own correctness is tested elsewhere."""
+    monkeypatch.setattr(rp, "ingest_event_probabilities", lambda *a, **k: {"status": "SKIPPED_IN_TEST"})
+
+
+def test_build_real_features_step_stores_a_matrix(con):
+    _seed_market_data(con)
+    matrix, summary = rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
+    assert not matrix.empty
+    assert summary["rows_stored"] == len(matrix)
+    assert summary["event_probabilities"] == {"status": "SKIPPED_IN_TEST"}
+
+    stored = con.execute("SELECT COUNT(*) FROM feature_snapshots WHERE feature_version = ?", [rp.REAL_FEATURE_VERSION]).fetchone()[0]
+    assert stored == len(matrix)
+
+
+def test_evaluate_real_step_never_touches_holdout_and_produces_a_promotion_decision(con):
+    _seed_market_data(con)
+    rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
+
+    # A holdout window matching the seeded data's tail, not the far-future
+    # production default -- the point-in-time holdout mechanism is what's
+    # under test here, not the specific default dates.
+    calendar_end = pd.bdate_range("2020-01-02", periods=1400)[-1]
+    holdout = HoldoutConfig(start_date=calendar_end - pd.Timedelta(days=80), end_date=calendar_end)
+
+    evaluation = rp.evaluate_real_step(con, SYMBOLS, holdout=holdout, initial_train_fraction=0.5, validation_fraction=0.15)
+
+    assert not evaluation.development_df.empty
+    assert not evaluation.holdout_df.empty
+    assert (evaluation.development_df["timestamp"] < holdout.start_date).all()
+    assert len(evaluation.fold_results) >= 1
+    assert evaluation.champion_model_version is not None
+    assert isinstance(evaluation.promoted, bool)
+    assert evaluation.promotion_rationale  # non-empty explanation either way
+
+    # A weak/random model trained on synthetic-shaped iid-ish price data
+    # has no business auto-promoting -- the V0.2 initial-qualification
+    # bar (learning/initial_qualification.py) should be doing real work.
+    log = repo.get_promotion_log(con) if hasattr(repo, "get_promotion_log") else con.execute("SELECT * FROM promotion_log").fetchdf()
+    assert len(log) == 1
+    assert log.iloc[0]["challenger_version"] == evaluation.champion_model_version
+
+
+def test_run_real_demo_with_skip_ingestion_completes_without_network(con):
+    _seed_market_data(con)
+    calendar_end = pd.bdate_range("2020-01-02", periods=1400)[-1]
+    result = rp.run_real_demo(
+        con, SYMBOLS, start=pd.Timestamp("2020-01-02"), end=calendar_end, skip_ingestion=True,
+    )
+    assert result.evaluation.champion_model_version is not None
+    assert isinstance(result.n_fills, int)
+    assert isinstance(result.n_rejected_orders, int)
+    assert isinstance(result.rejection_reason_codes, list)

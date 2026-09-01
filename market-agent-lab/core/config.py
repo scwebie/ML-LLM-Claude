@@ -53,6 +53,12 @@ class Settings:
     api_host: str = field(default_factory=lambda: os.getenv("API_HOST", "0.0.0.0"))
     api_port: int = field(default_factory=lambda: int(os.getenv("API_PORT", "8000")))
 
+    # Final untouched holdout period (V0.2, Stage 12). Configurable so the
+    # dates can be fixed once, in advance, and never adjusted after seeing
+    # results -- see backtesting/holdout.py for the enforcement mechanism.
+    holdout_start_date: str = field(default_factory=lambda: os.getenv("HOLDOUT_START_DATE", "2024-07-01"))
+    holdout_end_date: str = field(default_factory=lambda: os.getenv("HOLDOUT_END_DATE", "2025-06-30"))
+
     # Hard safety invariant. This is intentionally NOT overridable via
     # environment variable -- v0.1 is paper-trading only, full stop.
     paper_trading_only: bool = True

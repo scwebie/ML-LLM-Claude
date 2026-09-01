@@ -114,14 +114,98 @@ def distance_from_52w_low(close: pd.Series) -> pd.Series:
     return close / rolling_low - 1.0
 
 
+# --------------------------------------------------------------------------
+# Version 0.2 additions (Phase 10 of the brief): more return horizons, EMAs,
+# MACD histogram, Bollinger bandwidth, additional volatility windows,
+# downside volatility, gap/overnight returns, and drawdown-from-high.
+# All still pure single-symbol arithmetic -- no benchmark/cross-sectional
+# data needed here (that's features/cross_sectional.py and
+# features/market_breadth.py, plus compute_rolling_beta_correlation below
+# which explicitly takes a second, benchmark return series).
+# --------------------------------------------------------------------------
+
+
+def ema(close: pd.Series, span: int) -> pd.Series:
+    return close.ewm(span=span, adjust=False, min_periods=span).mean()
+
+
+def macd_histogram(macd_line: pd.Series, signal_line: pd.Series) -> pd.Series:
+    return macd_line - signal_line
+
+
+def bollinger_bandwidth(close: pd.Series, window: int = 20, n_std: float = 2.0) -> pd.Series:
+    """(upper - lower) / mid -- band width relative to price, distinct from
+    ``bollinger_band_position`` (where price sits within the bands)."""
+    mid = close.rolling(window, min_periods=window).mean()
+    std = close.rolling(window, min_periods=window).std()
+    upper = mid + n_std * std
+    lower = mid - n_std * std
+    return (upper - lower) / mid
+
+
+def downside_volatility(close: pd.Series, window: int = 20) -> pd.Series:
+    """Annualised standard deviation of NEGATIVE daily returns only
+    (semi-deviation) -- distinguishes downside risk from symmetric
+    realised volatility."""
+    daily_returns = close.pct_change()
+    downside = daily_returns.where(daily_returns < 0, 0.0)
+    return downside.rolling(window, min_periods=window).std() * np.sqrt(TRADING_DAYS_PER_YEAR)
+
+
+def gap_return(open_: pd.Series, close: pd.Series) -> pd.Series:
+    """Today's open vs. yesterday's close -- the overnight/weekend gap."""
+    prev_close = close.shift(1)
+    return open_ / prev_close - 1.0
+
+
+def overnight_return(open_: pd.Series, close: pd.Series) -> pd.Series:
+    """Alias of gap_return kept as a distinct, explicitly-named column per
+    the brief's feature list; identical definition."""
+    return gap_return(open_, close)
+
+
+def drawdown_from_rolling_high(close: pd.Series, window: int = TRADING_DAYS_PER_YEAR) -> pd.Series:
+    rolling_high = close.rolling(window, min_periods=1).max()
+    return close / rolling_high - 1.0
+
+
+def compute_rolling_beta_correlation(
+    symbol_returns: pd.Series, benchmark_returns: pd.Series, window: int = 60
+) -> tuple[pd.Series, pd.Series]:
+    """Rolling beta and correlation of ``symbol_returns`` against
+    ``benchmark_returns`` (both daily simple returns, same index). Returns
+    ``(beta, correlation)``. Requires benchmark data, so this is called
+    separately from ``compute_technical_features`` (which only ever sees
+    one symbol's own OHLCV) -- see ``data/real_technical_features.py``."""
+    aligned = pd.concat([symbol_returns, benchmark_returns], axis=1, join="inner")
+    aligned.columns = ["symbol", "benchmark"]
+    rolling_cov = aligned["symbol"].rolling(window, min_periods=window).cov(aligned["benchmark"])
+    rolling_var = aligned["benchmark"].rolling(window, min_periods=window).var()
+    beta = rolling_cov / rolling_var
+    correlation = aligned["symbol"].rolling(window, min_periods=window).corr(aligned["benchmark"])
+    return beta, correlation
+
+
+def relative_momentum(symbol_returns_cum: pd.Series, reference_returns_cum: pd.Series) -> pd.Series:
+    """Symbol's cumulative return minus a reference's (benchmark or
+    sector-average) cumulative return over the same window -- used for both
+    'sector relative momentum' and 'market relative momentum'."""
+    aligned = pd.concat([symbol_returns_cum, reference_returns_cum], axis=1, join="inner")
+    aligned.columns = ["symbol", "reference"]
+    return aligned["symbol"] - aligned["reference"]
+
+
 TECHNICAL_FEATURE_COLUMNS: list[str] = [
-    "return_1d", "return_5d", "return_10d", "return_20d", "return_60d",
+    "return_1d", "return_2d", "return_5d", "return_10d", "return_20d", "return_60d", "return_120d", "return_252d",
     "sma_10", "sma_20", "sma_50", "sma_100", "sma_200",
+    "ema_12", "ema_26",
     "dist_sma_20", "dist_sma_50", "dist_sma_200",
-    "rsi_14", "macd", "macd_signal", "atr_14", "bollinger_position",
-    "realised_vol_10d", "realised_vol_20d", "realised_vol_60d",
+    "rsi_14", "macd", "macd_signal", "macd_histogram", "atr_14",
+    "bollinger_position", "bollinger_bandwidth",
+    "realised_vol_10d", "realised_vol_20d", "realised_vol_60d", "realised_vol_120d", "downside_vol_20d",
     "volume_zscore_20d", "relative_volume_20d",
     "dist_52w_high", "dist_52w_low",
+    "gap_return", "overnight_return", "drawdown_from_high",
 ]
 
 
@@ -139,6 +223,7 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     low = df["low"]
     volume = df["volume"]
 
+    open_ = df["open"]
     sma_10 = sma(close, 10)
     sma_20 = sma(close, 20)
     sma_50 = sma(close, 50)
@@ -151,30 +236,42 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
             "timestamp": df["timestamp"].to_numpy(),
             "symbol": df["symbol"].to_numpy(),
             "return_1d": returns(close, 1),
+            "return_2d": returns(close, 2),
             "return_5d": returns(close, 5),
             "return_10d": returns(close, 10),
             "return_20d": returns(close, 20),
             "return_60d": returns(close, 60),
+            "return_120d": returns(close, 120),
+            "return_252d": returns(close, 252),
             "sma_10": sma_10,
             "sma_20": sma_20,
             "sma_50": sma_50,
             "sma_100": sma_100,
             "sma_200": sma_200,
+            "ema_12": ema(close, 12),
+            "ema_26": ema(close, 26),
             "dist_sma_20": distance_from_sma(close, sma_20),
             "dist_sma_50": distance_from_sma(close, sma_50),
             "dist_sma_200": distance_from_sma(close, sma_200),
             "rsi_14": rsi(close, 14),
             "macd": macd_line,
             "macd_signal": macd_signal_line,
+            "macd_histogram": macd_histogram(macd_line, macd_signal_line),
             "atr_14": atr(high, low, close, 14),
             "bollinger_position": bollinger_band_position(close, 20),
+            "bollinger_bandwidth": bollinger_bandwidth(close, 20),
             "realised_vol_10d": realised_volatility(close, 10),
             "realised_vol_20d": realised_volatility(close, 20),
             "realised_vol_60d": realised_volatility(close, 60),
+            "realised_vol_120d": realised_volatility(close, 120),
+            "downside_vol_20d": downside_volatility(close, 20),
             "volume_zscore_20d": volume_zscore(volume, 20),
             "relative_volume_20d": relative_volume(volume, 20),
             "dist_52w_high": distance_from_52w_high(close),
             "dist_52w_low": distance_from_52w_low(close),
+            "gap_return": gap_return(open_, close),
+            "overnight_return": overnight_return(open_, close),
+            "drawdown_from_high": drawdown_from_rolling_high(close),
         }
     )
     return out

@@ -1,4 +1,4 @@
-# Model Design (Version 0.1)
+# Model Design (Version 0.1, + Version 0.2 addendum below)
 
 ## Features
 
@@ -127,3 +127,40 @@ to `promotion_log`, so the promotion history is fully auditable
   volatility estimate, then clips to `max_position_weight` -- a
   deliberately simple, documented Kelly-adjacent heuristic, not a
   variance-covariance optimiser.
+
+## Version 0.2 addendum: real-data features, targets, and evaluation
+
+Everything above describes V0.1's synthetic pipeline (`main.py demo`),
+which is completely unchanged. V0.2 extends the model with real feature
+families and a materially different evaluation methodology -- full detail
+in `docs/evaluation_v02.md`, `docs/point_in_time_data.md`, and
+`docs/data_sources.md`; summarised here for context:
+
+* **Targets are identical** -- the same four (`excess_return_5d`,
+  `excess_return_20d`, `positive_5d`, `positive_20d`), computed by the
+  same `models/train.py::compute_excess_return_targets`, just against the
+  real benchmark (SPY, `data/real_prices.py::REAL_BENCHMARK_SYMBOL`)
+  instead of the synthetic `SYN_BENCH`.
+* **Additional feature families** (`data/real_features.py`,
+  `features/cross_sectional.py`, `features/market_breadth.py`,
+  `features/news_features.py`): raw macro variables (`macro_raw_*`, fed
+  alongside the Market Overview Agent's derived regime codes), SEC-filing-
+  based fundamentals, cross-sectional percentile ranks, market breadth,
+  deterministic news features, and the optional read-only event-
+  probability signal (`eventprob_*`).
+* **Evaluation is no longer plain expanding-window walk-forward.** V0.1's
+  `run_walk_forward` is unsafe for a 20-day-forward target once purging
+  matters; V0.2 uses purged+embargoed+nested walk-forward
+  (`backtesting/purged_walk_forward.py`) plus a final untouched holdout
+  (`backtesting/holdout.py`) -- see `docs/evaluation_v02.md` for the full
+  methodology and why it was necessary.
+* **Promotion is stricter for a first model** -- V0.1's `decide_promotion`
+  auto-promotes any positive-IC first challenger; V0.2 adds
+  `learning/champion_challenger_v2.py`'s initial-qualification bar
+  (minimum sample size, IC, Sharpe, and permutation-test significance) on
+  top, applied only when there is no existing champion.
+* **A ten-piece robustness suite** (`backtesting/robustness.py`) is
+  available for bootstrap CIs, feature-family ablation, permutation
+  tests, a negative control, regime/year breakdowns, calibration,
+  transaction-cost and execution-delay stress testing, factor exposure,
+  and feature-importance stability -- see `docs/evaluation_v02.md`.

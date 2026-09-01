@@ -14,6 +14,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Query
 
+from api.v2_routes import router as v2_router
 from core.config import settings
 from database import repository as repo
 from database.db import get_connection
@@ -21,9 +22,10 @@ from models import registry as model_registry
 
 app = FastAPI(
     title="market-agent-lab API",
-    description="Paper-trading-only research system monitoring API (Version 0.1)",
-    version="0.1.0",
+    description="Paper-trading-only research system monitoring API (Version 0.1 endpoints + V0.2 /v2 additions)",
+    version="0.2.0",
 )
+app.include_router(v2_router)
 
 
 def _con():

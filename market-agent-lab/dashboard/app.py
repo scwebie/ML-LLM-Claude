@@ -20,14 +20,16 @@ from backtesting.engine import buy_and_hold_benchmark
 from backtesting.metrics import daily_returns
 from data import synthetic as synthetic_data
 from data.market_data import get_ohlcv
+from data.providers import registry as provider_registry
 from database import repository as repo
+from database import repository_v2 as repo_v2
 from database.db import get_connection
 from features.feature_store import DEFAULT_FEATURE_VERSION, load_feature_matrix
 from models import registry as model_registry
 from models.evaluate import calibration_curve, feature_importance
 
 st.set_page_config(page_title="market-agent-lab", layout="wide")
-st.title("market-agent-lab -- Version 0.1 (PAPER TRADING / SIMULATION ONLY)")
+st.title("market-agent-lab -- Version 0.1 + 0.2 (PAPER TRADING / SIMULATION ONLY)")
 st.caption(
     "This dashboard visualises a fully simulated research + trading pipeline. "
     "No live brokerage or prediction-market connection exists anywhere in this system."
@@ -36,8 +38,8 @@ st.caption(
 con = get_connection()
 SECTOR_MAP = dict(synthetic_data.SYMBOLS)
 
-tab_portfolio, tab_model, tab_agents, tab_backtest, tab_risk = st.tabs(
-    ["Portfolio", "Model", "Agents", "Backtest", "Risk"]
+tab_portfolio, tab_model, tab_agents, tab_backtest, tab_risk, tab_provider_health, tab_data_quality, tab_robustness = st.tabs(
+    ["Portfolio", "Model", "Agents", "Backtest", "Risk", "Provider Health", "Data Quality", "Robustness"]
 )
 
 # --------------------------------------------------------------------------
@@ -201,3 +203,99 @@ with tab_risk:
     from portfolio.risk import RiskLimits
 
     st.json(RiskLimits().__dict__)
+
+# --------------------------------------------------------------------------
+# Provider Health (V0.2)
+# --------------------------------------------------------------------------
+with tab_provider_health:
+    st.caption("Real-data provider status, derived from the persisted ingestion-run history (data_ingestion_runs).")
+    catalog = provider_registry.get_catalog()
+    runs = repo_v2.get_ingestion_runs(con)
+    rows = []
+    for source in catalog:
+        source_runs = runs[runs["source_id"] == source.source_id] if not runs.empty else runs
+        row = source.model_dump()
+        if source_runs is None or source_runs.empty:
+            row.update({"last_status": None, "last_run_at": None, "total_runs": 0, "total_records_ingested": 0})
+        else:
+            latest = source_runs.sort_values("started_at").iloc[-1]
+            row.update(
+                {
+                    "last_status": latest["status"], "last_run_at": latest["started_at"],
+                    "total_runs": len(source_runs), "total_records_ingested": int(source_runs["records_ingested"].sum()),
+                }
+            )
+        rows.append(row)
+    health_df = pd.DataFrame(rows)
+    if health_df.empty:
+        st.info("No providers registered.")
+    else:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Enabled providers", int(health_df["is_enabled"].sum()))
+        col2.metric("Providers with a successful ingest", int((health_df["last_status"] == "SUCCESS").sum()))
+        col3.metric("Total records ingested", int(health_df["total_records_ingested"].sum()))
+        st.dataframe(
+            health_df[["source_id", "category", "is_enabled", "requires_api_key", "notes", "last_status", "last_run_at", "total_runs", "total_records_ingested"]],
+            use_container_width=True,
+        )
+
+    st.subheader("Ingestion run history")
+    if runs.empty:
+        st.info("No ingestion runs recorded yet -- run `uv run python main.py ingest-prices` (etc.) or `real-demo` first.")
+    else:
+        st.dataframe(runs.sort_values("started_at", ascending=False).head(200), use_container_width=True)
+
+# --------------------------------------------------------------------------
+# Data Quality (V0.2)
+# --------------------------------------------------------------------------
+with tab_data_quality:
+    st.subheader("Data quality flags")
+    flags = repo_v2.get_quality_flags(con)
+    if flags.empty:
+        st.info("No data quality flags recorded yet.")
+    else:
+        severity_counts = flags["severity"].value_counts()
+        st.bar_chart(severity_counts)
+        st.dataframe(flags.sort_values("created_at", ascending=False).head(300), use_container_width=True)
+
+    st.subheader("Price reconciliation status (primary vs. secondary source)")
+    reconciliations = repo_v2.get_price_reconciliations(con)
+    if reconciliations.empty:
+        st.info("No price reconciliation records yet -- run `uv run python main.py ingest-prices` first.")
+    else:
+        status_counts = reconciliations["status"].value_counts()
+        st.bar_chart(status_counts)
+        st.dataframe(reconciliations.tail(300), use_container_width=True)
+
+    st.subheader("Final holdout access audit trail")
+    st.caption("Every recorded access to the final, untouched holdout evaluation period -- should be sparse and deliberate.")
+    holdout_log = repo_v2.get_holdout_access_log(con)
+    if holdout_log.empty:
+        st.info("The holdout period has never been accessed in this database -- as expected before a final evaluation.")
+    else:
+        st.dataframe(holdout_log, use_container_width=True)
+
+# --------------------------------------------------------------------------
+# Robustness (V0.2)
+# --------------------------------------------------------------------------
+with tab_robustness:
+    st.caption("Ablation, bootstrap-CI, permutation-test, and factor-exposure reports written by backtesting/robustness.py.")
+    model_versions = con.execute(
+        "SELECT DISTINCT model_version FROM model_evaluations ORDER BY model_version"
+    ).fetchdf()
+    if model_versions.empty:
+        st.info("No robustness-suite results recorded yet -- run `uv run python main.py evaluate-real` first.")
+    else:
+        selected_version = st.selectbox("Model version", model_versions["model_version"].tolist())
+        evaluations = repo_v2.get_model_evaluations(con, selected_version)
+        if evaluations.empty:
+            st.info("No robustness results for this model version.")
+        else:
+            for eval_type in sorted(evaluations["evaluation_type"].unique()):
+                with st.expander(eval_type):
+                    for _, row in evaluations[evaluations["evaluation_type"] == eval_type].iterrows():
+                        st.json(json.loads(row["payload_json"]))
+
+    st.subheader("Champion/challenger promotion log")
+    st.caption("Includes V0.2's stricter initial-qualification gate (learning/champion_challenger_v2.py) for entries with no prior champion.")
+    st.dataframe(repo.get_promotion_log(con), use_container_width=True)
