@@ -24,6 +24,11 @@ data_store/results/*
 *.duckdb
 *.parquet
 
+# On-disk HTTP response cache for external data providers (V0.2) --
+# content-hash-keyed JSON blobs regenerated on demand, never committed.
+data_store/cache/*
+!data_store/cache/.gitkeep
+
 # IDE
 .vscode/
 .idea/
