@@ -6,10 +6,19 @@ project needs. Same vintage-timestamp limitation as ``fred.py``: BLS's
 public API does not expose the historical release timestamp per data
 point, so ``typical_lag_days`` (BLS's own well-documented, regular release
 schedule) is used as a conservative publication-timestamp approximation.
+
+BLS marks individual suppressed/not-yet-available observations within an
+otherwise valid series using ``"-"`` (and sometimes blank/``None``/``"N/A"``)
+rather than omitting them. ``_parse_bls_value`` treats those -- and any
+other non-numeric or non-finite value -- as a single missing observation
+to skip, never as a reason to fail the whole series and never fabricated
+as ``0.0``. ``BlsProvider.last_skipped`` reports how many observations
+were skipped on the most recent ``get_series()`` call.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -22,6 +31,32 @@ SOURCE_ID = "bls"
 BASE_URL = "https://api.bls.gov/publicAPI/v2"
 
 _PERIOD_TO_MONTH = {f"M{i:02d}": i for i in range(1, 13)}
+
+# BLS uses these (and blank/None) to mark a suppressed or not-yet-available
+# observation within an otherwise-valid series -- not a series-level error.
+_MISSING_VALUE_TOKENS = {"-", "n/a"}
+
+
+def _parse_bls_value(raw: Any) -> float | None:
+    """Parse a single BLS observation value.
+
+    Returns ``None`` (never raises) for anything that isn't a genuine
+    finite number: missing/blank/``None``, BLS's own missing-data tokens
+    (``"-"``, ``"N/A"``), unparseable strings, or non-finite results
+    (``NaN``/``inf``) -- so one bad observation never takes down the rest
+    of the series.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in _MISSING_VALUE_TOKENS | {""}:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -47,8 +82,13 @@ class BlsProvider:
 
     def __init__(self, client: RateLimitedClient | None = None) -> None:
         self.client = client or RateLimitedClient()
+        # Count of individual observations skipped as missing/non-numeric
+        # on the most recent get_series() call -- exposed for ingestion
+        # reporting (never used to fail the series itself).
+        self.last_skipped: int = 0
 
     def get_series(self, series_id: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        self.last_skipped = 0
         params: dict[str, Any] = {"startyear": str(start.year), "endyear": str(end.year)}
         if os.getenv("BLS_API_KEY"):
             params["registrationkey"] = os.getenv("BLS_API_KEY")
@@ -89,9 +129,15 @@ class BlsProvider:
                 period_end = datetime(year, month + 1, 1) - timedelta(days=1)
             if period_end < start or period_end > end:
                 continue
+            value = _parse_bls_value(entry.get("value"))
+            if value is None:
+                # A single suppressed/missing observation does not fail
+                # the series -- skip it, don't fabricate a zero.
+                self.last_skipped += 1
+                continue
             rows.append(
                 {
-                    "date": period_end, "value": float(entry["value"]),
+                    "date": period_end, "value": value,
                     "publication_date": period_end + timedelta(days=meta.typical_lag_days),
                 }
             )

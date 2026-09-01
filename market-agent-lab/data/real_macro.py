@@ -76,7 +76,10 @@ def ingest_macro(con: duckdb.DuckDBPyConnection, start: datetime, end: datetime)
                     }
                 )
             repo_v2.insert_ingestion_run(con, finish_ingestion_run(run, IngestionStatus.SUCCESS, records=len(rows)))
-            summary[f"bls:{series_id}"] = {"status": "SUCCESS", "records": len(rows), "name": name.name if name else series_id}
+            summary[f"bls:{series_id}"] = {
+                "status": "SUCCESS", "records": len(rows), "name": name.name if name else series_id,
+                "skipped_missing": provider.last_skipped,
+            }
     else:
         summary["bls"] = {"status": "UNAVAILABLE"}
 
