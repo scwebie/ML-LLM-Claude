@@ -35,7 +35,13 @@ def test_missing_metric_column_is_skipped_not_fabricated():
 
 def test_percentile_ranks_computed_independently_per_date():
     """A date with only 2 symbols must not be influenced by a different
-    date's 5-symbol universe -- confirms no cross-date leakage."""
+    date's 5-symbol universe -- confirms no cross-date leakage. Also
+    covers the SECOND date's group, whose rows carry original panel
+    indices [2, 3, 4] -- a regression guard for a real index-alignment
+    bug where only a group whose original index happened to start at 0
+    (like day 1 here) produced non-NaN ranks; every later group produced
+    NaN, silently, because .rank()'s output Series carried the group's
+    original (non-reset) index while the output frame did not."""
     panel = pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2023-01-01")] * 2 + [pd.Timestamp("2023-01-02")] * 3,
@@ -47,6 +53,26 @@ def test_percentile_ranks_computed_independently_per_date():
     day1 = ranks[ranks.timestamp == pd.Timestamp("2023-01-01")]
     assert len(day1) == 2
     assert set(day1["momentum_percentile"]) == {0.5, 1.0}  # only ranked among that day's 2 symbols
+
+    day2 = ranks[ranks.timestamp == pd.Timestamp("2023-01-02")]
+    assert len(day2) == 3
+    assert day2["momentum_percentile"].notna().all()
+    row_e = day2[day2.symbol == "E"].iloc[0]  # highest return_60d (0.25) among C/D/E
+    assert row_e["momentum_percentile"] == 1.0
+
+
+def test_compute_percentile_ranks_is_positional_not_index_aligned():
+    """Direct regression test for the index-alignment bug: a cross_section
+    slice carrying a non-zero-starting, non-contiguous original index
+    (exactly what a groupby() split of a larger frame produces) must
+    still produce real percentile ranks, not NaN."""
+    cross_section = pd.DataFrame(
+        {"symbol": ["A", "B", "C"], "dollar_volume": [100.0, 300.0, 200.0]}, index=[57, 58, 59]
+    )
+    ranks = compute_percentile_ranks(cross_section, {"liquidity_percentile": ("dollar_volume", True)})
+    assert ranks["liquidity_percentile"].notna().all()
+    row_b = ranks[ranks.symbol == "B"].iloc[0]
+    assert row_b["liquidity_percentile"] == 1.0  # highest dollar_volume
 
 
 def test_market_breadth_pct_above_sma():

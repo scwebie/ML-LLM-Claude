@@ -1,6 +1,15 @@
 # market-agent-lab
 
-**Version 0.1 -- PAPER TRADING / SIMULATION ONLY.**
+**Version 0.1 + Version 0.2 -- PAPER TRADING / SIMULATION ONLY.**
+
+V0.1 (below) proved the architecture end to end on synthetic data. V0.2
+extends it (does not replace it -- `main.py demo` still runs the original
+synthetic pipeline unchanged) with real market data, real fundamentals,
+real macro data, real news, an optional read-only prediction-market
+signal, and a materially stricter evaluation methodology. See
+[**Version 0.2**](#version-02----real-data-research-platform) below for
+the V0.2-specific quickstart, or jump straight to the experiment report:
+[`docs/EXPERIMENT_REPORT.md`](docs/EXPERIMENT_REPORT.md).
 
 A multi-agent quantitative market-research and machine-learning system.
 This version proves that the architecture -- research agents, feature
@@ -191,7 +200,7 @@ Every decision is logged to `promotion_log` with its full rationale.
   enforced limit, but with only 10 symbols across 5 sectors it is a
   coarse approximation of real portfolio construction.
 
-## Recommended next development milestone
+## Recommended next development milestone (Version 0.1)
 
 Wire `learning/drift.py`'s PSI and IC-drop detectors into a scheduled
 trigger (e.g. a periodic job that calls `learning/retrain.py` +
@@ -201,3 +210,71 @@ real, licensed, delayed (never real-time-trading-grade) market-data feed
 behind the same `data/market_data.py` / `data/fundamentals.py` /
 `data/macro.py` / `data/news.py` interfaces -- the rest of the pipeline
 should not need to change.
+
+*(V0.2, below, is exactly that milestone.)*
+
+---
+
+## Version 0.2 -- real-data research platform
+
+**Still paper-trading / simulation only.** V0.2 replaces synthetic data
+with real market data, real SEC fundamentals, real macro data, real news,
+and an optional read-only prediction-market research signal -- but the
+hard safety boundaries in `docs/architecture.md` are unchanged: no real
+brokerage, no real trade, no execution/wagering capability anywhere, and
+the LLM never controls risk or execution.
+
+### What's new
+
+* **Real data** -- see [`docs/data_sources.md`](docs/data_sources.md) for
+  every provider, what's enabled/disabled and why, and
+  [`docs/provider_setup.md`](docs/provider_setup.md) for API-key setup.
+* **Point-in-time discipline** across prices, fundamentals, macro, news,
+  events, and universe membership -- see
+  [`docs/point_in_time_data.md`](docs/point_in_time_data.md).
+* **Purged + embargoed + nested walk-forward evaluation, a final
+  untouched holdout, a ten-piece robustness suite, and a stricter
+  champion/challenger gate** -- see
+  [`docs/evaluation_v02.md`](docs/evaluation_v02.md).
+* **A read-only prediction-market signal** (Polymarket) with an absolute,
+  structurally-tested prohibition on any execution/wagering/wallet/auth
+  capability.
+* **New CLI commands**, **new `/v2` API endpoints**, and **three new
+  dashboard tabs** (Provider Health, Data Quality, Robustness).
+
+### V0.2 quickstart
+
+```bash
+# No API keys required for the default run.
+uv run python main.py real-demo
+```
+
+This runs the full V0.2 pipeline end to end: ingest real prices,
+fundamentals, macro data, and news for the default 20-symbol universe;
+build the point-in-time real feature matrix; purged+embargoed
+walk-forward evaluation with the V0.2 champion/challenger gate; and a
+genuine paper-trading backtest through the same Portfolio/Risk/Execution
+engine V0.1 uses. Or run each stage independently:
+
+```bash
+uv run python main.py ingest-prices
+uv run python main.py ingest-fundamentals
+uv run python main.py ingest-macro
+uv run python main.py ingest-news
+uv run python main.py build-real-features
+uv run python main.py evaluate-real       # never touches the final holdout
+```
+
+`main.py demo` (V0.1's synthetic pipeline) is completely unaffected by
+any of the above -- they write to separate, additively-designed tables
+(`core/schemas_v2.py`) plus a distinct `feature_version` (`real_fv1`) in
+V0.1's shared `feature_snapshots` table.
+
+### Full experiment report
+
+[`docs/EXPERIMENT_REPORT.md`](docs/EXPERIMENT_REPORT.md) documents this
+project's actual `real-demo` run against real market data (2019-2025,
+default 20-symbol universe): engineering results, data coverage,
+evaluation methodology, model performance vs. benchmarks, robustness
+results, and explicit safety confirmations -- reported without
+cherry-picking, per the project brief.

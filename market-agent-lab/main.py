@@ -224,6 +224,7 @@ def ingest_prices(
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
     """V0.2: ingest real equity prices (Yahoo Finance + StockAnalysis.com, reconciled) for a universe."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
@@ -238,6 +239,7 @@ def ingest_fundamentals(
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
     """V0.2: ingest real SEC EDGAR fundamentals (point-in-time, publication-timestamped) for a universe."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
@@ -253,6 +255,7 @@ def ingest_macro(
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
     """V0.2: ingest real macro data (FRED, BLS, Treasury Fiscal Data; BEA reports UNAVAILABLE without an API key)."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
@@ -268,6 +271,7 @@ def ingest_news(
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
     """V0.2: ingest real news (SEC 8-K item-classified events; other sources disabled by default -- see docs/data_sources.md)."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
@@ -284,6 +288,7 @@ def build_real_features(
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
     """V0.2: build the point-in-time real feature matrix from already-ingested data and store it."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
@@ -299,6 +304,7 @@ def evaluate_real(
 ) -> None:
     """V0.2: purged+embargoed walk-forward evaluation on the development set, then the V0.2
     champion/challenger promotion decision. Never touches the final holdout period."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
@@ -332,6 +338,7 @@ def real_demo(
     """V0.2: the full real-data pipeline end to end -- ingest -> build-real-features ->
     evaluate-real -> a genuine paper-trading backtest through the SAME Portfolio/Risk/
     Execution engine V0.1 uses, over real, out-of-sample data. PAPER-TRADING ONLY."""
+    configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)

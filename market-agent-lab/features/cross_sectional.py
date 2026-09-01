@@ -38,7 +38,18 @@ def compute_percentile_ranks(
     for name, (source_col, ascending) in metric_spec.items():
         if source_col not in cross_section.columns:
             continue
-        out[name] = cross_section[source_col].rank(pct=True, ascending=ascending)
+        # .to_numpy() forces a positional assignment. Without it, pandas
+        # aligns the ranked Series to `out` by INDEX LABEL -- and
+        # `cross_section` is almost always a groupby() split of a larger
+        # frame (see compute_percentile_ranks_multi_date and
+        # data/real_features.py), so it carries the ORIGINAL, non-reset
+        # row indices from that larger frame while `out` has a fresh
+        # 0..n-1 index. Every label mismatch silently produced NaN --
+        # in production this meant nearly every percentile rank was NaN
+        # (verified against a live 20-symbol/2019-2025 real feature
+        # matrix: liquidity_percentile, which depends only on the always-
+        # populated dollar_volume, was NaN in 99.94% of rows).
+        out[name] = cross_section[source_col].rank(pct=True, ascending=ascending).to_numpy()
     return out
 
 
