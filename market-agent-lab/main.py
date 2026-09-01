@@ -208,6 +208,153 @@ def demo(
     typer.echo(f"\nDemo completed in {(datetime.now(UTC) - started_at).total_seconds():.1f}s")
 
 
+def _parse_date(value: str | None, default: datetime) -> datetime:
+    return datetime.fromisoformat(value) if value else default
+
+
+def _parse_symbols(value: str | None) -> list[str] | None:
+    return value.split(",") if value else None
+
+
+@app.command()
+def ingest_prices(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    start: str = typer.Option(None, help="ISO start date, default 2020-01-01"),
+    end: str = typer.Option(None, help="ISO end date, default today"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: ingest real equity prices (Yahoo Finance + StockAnalysis.com, reconciled) for a universe."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    result = rp.ingest_prices_step(con, symbol_list, _parse_date(start, datetime(2020, 1, 1)), _parse_date(end, datetime.now()))
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+@app.command()
+def ingest_fundamentals(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: ingest real SEC EDGAR fundamentals (point-in-time, publication-timestamped) for a universe."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    result = rp.ingest_fundamentals_step(con, symbol_list)
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+@app.command()
+def ingest_macro(
+    start: str = typer.Option(None, help="ISO start date, default 2020-01-01"),
+    end: str = typer.Option(None, help="ISO end date, default today"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: ingest real macro data (FRED, BLS, Treasury Fiscal Data; BEA reports UNAVAILABLE without an API key)."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    result = rp.ingest_macro_step(con, _parse_date(start, datetime(2020, 1, 1)), _parse_date(end, datetime.now()))
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+@app.command()
+def ingest_news(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    start: str = typer.Option(None, help="ISO start date, default 2020-01-01"),
+    end: str = typer.Option(None, help="ISO end date, default today"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: ingest real news (SEC 8-K item-classified events; other sources disabled by default -- see docs/data_sources.md)."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    result = rp.ingest_news_step(con, symbol_list, _parse_date(start, datetime(2020, 1, 1)), _parse_date(end, datetime.now()))
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+@app.command()
+def build_real_features(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    universe_name: str = typer.Option("real_default", help="Point-in-time universe name to seed/use"),
+    use_llm: bool = typer.Option(False, help="Enable optional LLM narrative enhancement for agents"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: build the point-in-time real feature matrix from already-ingested data and store it."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    _matrix, summary = rp.build_real_features_step(con, symbol_list, universe_name)
+    typer.echo(json.dumps(summary, indent=2, default=str))
+
+
+@app.command()
+def evaluate_real(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: purged+embargoed walk-forward evaluation on the development set, then the V0.2
+    champion/challenger promotion decision. Never touches the final holdout period."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    evaluation = rp.evaluate_real_step(con, symbol_list)
+    typer.echo(json.dumps(
+        {
+            "n_folds": len(evaluation.fold_results),
+            "fold_metrics_summary": evaluation.fold_metrics_summary,
+            "champion_model_version": evaluation.champion_model_version,
+            "promoted": evaluation.promoted,
+            "promotion_rationale": evaluation.promotion_rationale,
+            "robustness": evaluation.robustness,
+            "development_rows": len(evaluation.development_df),
+            "holdout_rows_available_but_untouched": len(evaluation.holdout_df),
+        },
+        indent=2, default=str,
+    ))
+
+
+@app.command()
+def real_demo(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE (20 liquid US large caps)"),
+    start: str = typer.Option(None, help="ISO start date, default 2020-01-01"),
+    end: str = typer.Option(None, help="ISO end date, default today"),
+    initial_cash: float = typer.Option(1_000_000.0, help="Starting paper-trading cash"),
+    use_llm: bool = typer.Option(False, help="Enable optional LLM narrative enhancement for agents"),
+    skip_ingestion: bool = typer.Option(False, help="Skip live ingestion and use whatever is already in the database"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.2: the full real-data pipeline end to end -- ingest -> build-real-features ->
+    evaluate-real -> a genuine paper-trading backtest through the SAME Portfolio/Risk/
+    Execution engine V0.1 uses, over real, out-of-sample data. PAPER-TRADING ONLY."""
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    result = rp.run_real_demo(
+        con, symbol_list, _parse_date(start, datetime(2020, 1, 1)), _parse_date(end, datetime.now()),
+        initial_cash=initial_cash, use_llm=use_llm, skip_ingestion=skip_ingestion,
+    )
+    typer.echo(json.dumps(
+        {
+            "champion_model_version": result.evaluation.champion_model_version,
+            "promoted": result.evaluation.promoted,
+            "promotion_rationale": result.evaluation.promotion_rationale,
+            "fold_metrics_summary": result.evaluation.fold_metrics_summary,
+            "backtest_period": result.backtest_period,
+            "n_fills": result.n_fills,
+            "n_rejected_orders": result.n_rejected_orders,
+            "rejection_reason_codes": result.rejection_reason_codes,
+        },
+        indent=2, default=str,
+    ))
+
+
 @app.command()
 def serve_api(host: str | None = None, port: int | None = None) -> None:
     """Start the FastAPI monitoring/inference API."""

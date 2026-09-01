@@ -43,6 +43,20 @@ DEFAULT_REAL_UNIVERSE: list[str] = [
     "HD", "PG", "MA", "JNJ", "XOM", "COST", "MRK", "ABBV", "KO", "PEP",
 ]
 
+# A coarse, static sector tag per default-universe symbol -- used only for
+# sector-concentration risk checks (portfolio/risk.py) and the
+# event-relevance rule table (agents/event_relevance.py::RELEVANCE_RULES).
+# Not investment research, just a grouping; update alongside
+# DEFAULT_REAL_UNIVERSE if the symbol list changes.
+DEFAULT_REAL_SECTOR_MAP: dict[str, str] = {
+    "AAPL": "TECH", "MSFT": "TECH", "GOOGL": "TECH", "META": "TECH", "NVDA": "TECH",
+    "AMZN": "CONSUMER", "TSLA": "CONSUMER", "HD": "CONSUMER", "PG": "CONSUMER",
+    "COST": "CONSUMER", "KO": "CONSUMER", "PEP": "CONSUMER",
+    "JPM": "FINANCE", "V": "FINANCE", "MA": "FINANCE",
+    "UNH": "HEALTH", "JNJ": "HEALTH", "MRK": "HEALTH", "ABBV": "HEALTH",
+    "XOM": "ENERGY",
+}
+
 
 def seed_universe_membership(
     con: duckdb.DuckDBPyConnection,
