@@ -424,6 +424,22 @@ V02_DDL_STATEMENTS: list[str] = [
         created_at TIMESTAMP NOT NULL
     );
     """,
+    # --- Final holdout access audit trail (Stage 12) --------------------------------
+    # Every call to backtesting.holdout.evaluate_on_holdout writes exactly one row
+    # here -- the audit trail proving the holdout period was touched only for a
+    # final, formal evaluation and never during walk-forward model development.
+    """
+    CREATE TABLE IF NOT EXISTS holdout_access_log (
+        id VARCHAR PRIMARY KEY,
+        accessed_at TIMESTAMP NOT NULL,
+        purpose VARCHAR NOT NULL,
+        model_version VARCHAR NOT NULL,
+        holdout_start TIMESTAMP NOT NULL,
+        holdout_end TIMESTAMP NOT NULL,
+        n_rows INTEGER NOT NULL,
+        symbols VARCHAR
+    );
+    """,
 ]
 
 

@@ -346,3 +346,31 @@ class LeakageAuditResult(BaseModel):
     passed: bool
     details: str | None = None
     created_at: datetime
+
+
+# --------------------------------------------------------------------------
+# Final untouched holdout period (Stage 12)
+# --------------------------------------------------------------------------
+
+
+class HoldoutAccessLog(BaseModel):
+    """One recorded access to the final holdout evaluation period.
+
+    Every call to ``backtesting.holdout.evaluate_on_holdout`` writes one of
+    these rows -- there is no code path that reads holdout-period rows for
+    model selection, hyperparameter tuning, or feature engineering without
+    it being logged here. This is the audit trail that lets a reviewer
+    confirm the holdout was actually held out: it should contain exactly
+    one row per model formally evaluated, all logged at the end of the
+    project, never during walk-forward development."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=_new_id)
+    accessed_at: datetime
+    purpose: str
+    model_version: str
+    holdout_start: datetime
+    holdout_end: datetime
+    n_rows: int
+    symbols: list[str] = Field(default_factory=list)

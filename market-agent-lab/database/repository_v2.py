@@ -22,6 +22,7 @@ from core.schemas_v2 import (
     EventProbabilityObservation,
     EventSymbolMapping,
     FundamentalFact,
+    HoldoutAccessLog,
     LeakageAuditResult,
     NewsArticle,
     PriceReconciliation,
@@ -420,3 +421,24 @@ def get_model_evaluations(con: duckdb.DuckDBPyConnection, model_version: str, ev
         query += " AND evaluation_type = ?"
         params.append(evaluation_type)
     return con.execute(query, params).fetchdf()
+
+
+# --------------------------------------------------------------------------
+# Final holdout access audit trail (Stage 12)
+# --------------------------------------------------------------------------
+
+
+def insert_holdout_access_log(con: duckdb.DuckDBPyConnection, entry: HoldoutAccessLog) -> None:
+    con.execute(
+        "INSERT INTO holdout_access_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            entry.id, entry.accessed_at, entry.purpose, entry.model_version,
+            entry.holdout_start, entry.holdout_end, entry.n_rows, json.dumps(entry.symbols),
+        ],
+    )
+
+
+def get_holdout_access_log(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Every recorded holdout access, oldest first -- the audit trail
+    reviewed to confirm the holdout was used only for final evaluation."""
+    return con.execute("SELECT * FROM holdout_access_log ORDER BY accessed_at").fetchdf()
