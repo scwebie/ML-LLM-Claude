@@ -5,13 +5,36 @@ A configurable date range (``core/config.py::Settings.holdout_start_date``/
 results) that is never used for model selection, hyperparameter tuning,
 feature engineering iteration, or walk-forward fold boundaries.
 
-:func:`split_development_and_holdout` partitions a feature+target frame
-into ``(development_df, holdout_df)``. Every walk-forward run, ablation,
-and robustness check in this project (Stages 11, 13, 14) operates ONLY on
-``development_df``. :func:`evaluate_on_holdout` is the single, deliberately
-narrow entry point that may ever touch ``holdout_df``: it trains nothing
-itself, it only scores an already-selected, already-trained model, and it
-writes an audit-trail row (``core/schemas_v2.py::HoldoutAccessLog``, table
+Every real-data run has THREE temporal regions, not two:
+
+1. **PRE-HOLDOUT DEVELOPMENT** (``timestamp < holdout.start_date``) -- the
+   only region ever used for walk-forward folds, feature/hyperparameter
+   selection, ablation, or champion qualification.
+2. **FINAL HOLDOUT** (``holdout.start_date <= timestamp <= holdout.end_date``)
+   -- touched only through :func:`evaluate_on_holdout`, after model
+   selection is completely finished.
+3. **POST-HOLDOUT** (``timestamp > holdout.end_date``) -- real ingestion
+   keeps running past the holdout end (e.g. ``real-demo`` ingests through
+   "today"), and this region legitimately exists as a result. It must
+   NEVER leak backward into development for any model-selection,
+   hyperparameter-selection, feature-selection, ablation, or champion-
+   qualification decision. It is preserved (not discarded) for optional,
+   separate forward-paper-trading analysis after the historical holdout
+   experiment is complete.
+
+:func:`split_temporal_partitions` is the canonical three-way split,
+returning a :class:`TemporalPartition`. :func:`split_development_and_holdout`
+is a backward-compatible two-value wrapper around it (development_df,
+holdout_df only) for callers that don't need ``post_holdout_df`` -- both
+are bug-for-bug consistent: development_df never contains a row at or
+after ``holdout.start_date``, regardless of which entry point is used.
+
+Every walk-forward run, ablation, and robustness check in this project
+(Stages 11, 13, 14) operates ONLY on ``development_df``.
+:func:`evaluate_on_holdout` is the single, deliberately narrow entry point
+that may ever touch ``holdout_df``: it trains nothing itself, it only
+scores an already-selected, already-trained (frozen) model, and it writes
+an audit-trail row (``core/schemas_v2.py::HoldoutAccessLog``, table
 ``holdout_access_log``) to the database on every single call -- there is
 no silent-mode flag. A reviewer can query that table and confirm the
 holdout was accessed exactly as many times as models were formally
@@ -61,25 +84,52 @@ def default_holdout_config() -> HoldoutConfig:
     )
 
 
-def split_development_and_holdout(
+@dataclass(frozen=True)
+class TemporalPartition:
+    """The canonical three-way split of a real feature+target frame. Only
+    ``development_df`` may ever be used for model selection; see the
+    module docstring."""
+
+    development_df: pd.DataFrame
+    holdout_df: pd.DataFrame
+    post_holdout_df: pd.DataFrame
+
+
+def split_temporal_partitions(
     df: pd.DataFrame,
     holdout: HoldoutConfig | None = None,
     horizon_days: int = MAX_TARGET_HORIZON_DAYS,
     embargo_days: int = DEFAULT_EMBARGO_DAYS,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Partition ``df`` into ``(development_df, holdout_df)``.
+) -> TemporalPartition:
+    """Partition ``df`` into ``TemporalPartition(development_df, holdout_df,
+    post_holdout_df)``.
 
-    ``development_df`` is purged+embargoed against the holdout window
-    exactly like an outer walk-forward fold's training window is purged
-    against its validation window (see
+    ``development_df`` contains ONLY rows strictly before
+    ``holdout.start_date`` -- a row at or after the holdout start is never
+    eligible for development, no matter how far past the holdout it falls
+    (this is the fix for a real leakage bug: real ingestion keeps running
+    past the holdout end, e.g. ``real-demo`` ingesting through "today", and
+    an earlier version of this function only excluded rows *inside* the
+    holdout window, not rows *after* it -- so post-holdout data was
+    silently entering "development" and, from there, walk-forward folds
+    whose validation windows extended past the holdout, exactly the
+    failure ``assert_no_fold_touches_holdout`` exists to catch). On top of
+    that hard pre-holdout cutoff, the usual purge+embargo is applied
+    against the holdout boundary, exactly like an outer walk-forward
+    fold's training window is purged against its validation window (see
     ``backtesting/purged_walk_forward.py``): a development row whose
-    target-realization window reaches into the holdout period is
-    excluded, and rows within ``embargo_days`` trading days of either
-    edge of the holdout window are dropped from development too.
+    target-realization window reaches into the holdout period is excluded
+    too.
 
     ``holdout_df`` is untouched -- exactly the rows in
     ``[holdout.start_date, holdout.end_date]``, with no purge/embargo
     applied (there is nothing "downstream" of it to protect).
+
+    ``post_holdout_df`` is every row strictly after ``holdout.end_date``,
+    preserved (not discarded) for optional, separate forward-paper-trading
+    analysis -- but it must never be merged back into ``development_df``
+    or otherwise influence any model-selection decision tied to the
+    holdout experiment.
     """
     holdout = holdout or default_holdout_config()
     calendar = build_trading_calendar(df["timestamp"])
@@ -87,21 +137,59 @@ def split_development_and_holdout(
     holdout_mask = (df["timestamp"] >= holdout.start_date) & (df["timestamp"] <= holdout.end_date)
     holdout_df = df.loc[holdout_mask].sort_values(["timestamp", "symbol"]).reset_index(drop=True)
 
+    post_holdout_mask = df["timestamp"] > holdout.end_date
+    post_holdout_df = df.loc[post_holdout_mask].sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+
+    # Hard cutoff FIRST: only rows strictly before the holdout start are
+    # even candidates for development, regardless of purge/embargo status.
+    # This is what keeps post-holdout rows out even though purge/embargo
+    # alone (a symmetric window around the holdout boundary) would let
+    # anything past the embargo tail back in.
+    pre_holdout_mask = df["timestamp"] < holdout.start_date
     eligible = compute_purge_embargo_mask(
         df["timestamp"], calendar, holdout.start_date, holdout.end_date, horizon_days, embargo_days
     )
-    development_mask = (~holdout_mask) & eligible
+    development_mask = pre_holdout_mask & eligible
     development_df = df.loc[development_mask].sort_values(["timestamp", "symbol"]).reset_index(drop=True)
-    return development_df, holdout_df
+
+    if not development_df.empty:
+        assert development_df["timestamp"].max() < holdout.start_date, (
+            "internal invariant violated: development_df contains a row at or after holdout.start_date"
+        )
+    if not holdout_df.empty:
+        assert holdout_df["timestamp"].min() >= holdout.start_date
+        assert holdout_df["timestamp"].max() <= holdout.end_date
+    if not post_holdout_df.empty:
+        assert post_holdout_df["timestamp"].min() > holdout.end_date
+
+    return TemporalPartition(development_df=development_df, holdout_df=holdout_df, post_holdout_df=post_holdout_df)
+
+
+def split_development_and_holdout(
+    df: pd.DataFrame,
+    holdout: HoldoutConfig | None = None,
+    horizon_days: int = MAX_TARGET_HORIZON_DAYS,
+    embargo_days: int = DEFAULT_EMBARGO_DAYS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Backward-compatible two-value wrapper around
+    :func:`split_temporal_partitions` for callers that don't need
+    ``post_holdout_df``. New code -- especially the real-data evaluation
+    pipeline -- should call :func:`split_temporal_partitions` directly so
+    ``post_holdout_df`` is never silently dropped."""
+    partition = split_temporal_partitions(df, holdout, horizon_days, embargo_days)
+    return partition.development_df, partition.holdout_df
 
 
 def assert_no_fold_touches_holdout(folds: list[PurgedFold], holdout: HoldoutConfig | None = None) -> None:
     """Defensive wiring check: raises if any walk-forward fold's
-    validation window overlaps the holdout period at all. Intended to be
-    called wherever outer folds are generated for real-data evaluation
-    (e.g. the ``evaluate-real`` CLI command, Stage 15), so a future
-    configuration mistake that widens the development window into the
-    holdout can never pass silently."""
+    validation window overlaps the holdout period, OR does not end
+    strictly before the holdout start (a fold generated entirely from
+    data after the holdout would not literally "overlap" it but is just
+    as invalid -- it was never generated from pre-holdout development
+    data at all). Intended to be called wherever outer folds are
+    generated for real-data evaluation (e.g. the ``evaluate-real`` CLI
+    command, Stage 15), so a future configuration mistake that widens the
+    development window into or past the holdout can never pass silently."""
     holdout = holdout or default_holdout_config()
     for fold in folds:
         overlap = fold.validation_start <= holdout.end_date and fold.validation_end >= holdout.start_date
@@ -110,6 +198,12 @@ def assert_no_fold_touches_holdout(folds: list[PurgedFold], holdout: HoldoutConf
                 f"fold {fold.fold_id}: validation window [{fold.validation_start}, {fold.validation_end}] "
                 f"overlaps the holdout period [{holdout.start_date}, {holdout.end_date}] -- "
                 "the holdout must never be used for model selection"
+            )
+        if fold.validation_end >= holdout.start_date:
+            raise ValueError(
+                f"fold {fold.fold_id}: validation window [{fold.validation_start}, {fold.validation_end}] "
+                f"does not end strictly before the holdout start ({holdout.start_date}) -- every "
+                "model-selection fold must be generated entirely from pre-holdout development data"
             )
 
 

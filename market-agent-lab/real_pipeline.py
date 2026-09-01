@@ -12,23 +12,35 @@ plus the shared, provider-agnostic ``market_observations``/
 Pipeline stages, in the order ``real-demo`` runs them:
 
 1. Ingest prices, fundamentals, macro, news, and (read-only) event
-   probabilities for a configured universe.
+   probabilities for a configured universe -- ingestion keeps running
+   through "today" regardless of where the holdout period falls.
 2. Build the point-in-time real feature matrix and store it under a
    dedicated ``feature_version`` (``REAL_FEATURE_VERSION``), reusing
    V0.1's ``feature_snapshots`` table verbatim.
 3. Join to excess-return targets against the real benchmark (SPY) and
-   split into a purged/embargoed development set plus the final,
-   untouched holdout period (``backtesting/holdout.py``).
+   split into the three temporal regions (``backtesting/holdout.py::
+   split_temporal_partitions``): PRE-HOLDOUT development, the FINAL
+   holdout, and POST-HOLDOUT data (real ingestion routinely runs past the
+   holdout end -- those rows are preserved, never merged into
+   development, and never used for any model-selection decision here).
 4. Run the purged+embargoed walk-forward evaluator
-   (``backtesting/purged_walk_forward.py``) on the development set only.
+   (``backtesting/purged_walk_forward.py``) on PRE-HOLDOUT development
+   only.
 5. Register the latest fold's model and route it through the V0.2
    champion/challenger gate (``learning/champion_challenger_v2.py``),
-   which rejects a weak first model rather than auto-promoting it.
+   which rejects a weak first model rather than auto-promoting it. This
+   is the point at which the model is effectively FROZEN for the rest of
+   this run -- nothing after this step feeds back into selection.
 6. Run the SAME, unmodified Portfolio/Risk/Execution engine V0.1 uses
    (``backtesting/engine.py::run_ml_strategy_backtest``) over the most
-   recent development-set fold's validation window, to demonstrate the
-   full pipeline -- including the risk engine actually approving AND
-   rejecting orders -- on real, out-of-sample data.
+   recent development-set fold's validation window -- a DIAGNOSTIC
+   backtest, not the final out-of-sample result (it's still evaluated on
+   pre-holdout data the walk-forward process already saw the surrounding
+   context of).
+7. Evaluate the frozen, selected model on the FINAL holdout, exactly
+   once, via ``backtesting/holdout.py::evaluate_on_holdout`` -- this,
+   not step 6, is the genuine final out-of-sample result, and it never
+   feeds back into anything above.
 """
 
 from __future__ import annotations
@@ -42,9 +54,11 @@ import pandas as pd
 from backtesting.engine import run_ml_strategy_backtest
 from backtesting.holdout import (
     HoldoutConfig,
+    HoldoutEvaluationResult,
     assert_no_fold_touches_holdout,
     default_holdout_config,
-    split_development_and_holdout,
+    evaluate_on_holdout,
+    split_temporal_partitions,
 )
 from backtesting.metrics import sharpe_ratio
 from backtesting.purged_walk_forward import (
@@ -145,6 +159,7 @@ class RealEvaluationResult:
     promotion_rationale: str
     fold_metrics_summary: dict = field(default_factory=dict)
     robustness: dict = field(default_factory=dict)
+    post_holdout_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def evaluate_real_step(
@@ -159,10 +174,16 @@ def evaluate_real_step(
     window_mode: str = "expanding",
 ) -> RealEvaluationResult:
     """Loads the stored real feature matrix, joins to excess-return
-    targets against the real benchmark, splits development/holdout
-    (holdout is NEVER touched here), runs purged+embargoed walk-forward
-    on development only, and routes the latest fold's model through the
-    V0.2 champion/challenger gate."""
+    targets against the real benchmark, splits into the three temporal
+    regions (PRE-HOLDOUT development / holdout / post-holdout -- holdout
+    and post-holdout are NEVER touched here), runs purged+embargoed
+    walk-forward on pre-holdout development only, and routes the latest
+    fold's model through the V0.2 champion/challenger gate.
+
+    Real ingestion routinely runs past the holdout end (e.g. ``real-demo``
+    ingesting through "today"), so ``df`` may well contain rows after
+    ``holdout.end_date`` -- those become ``post_holdout_df`` and take no
+    part in anything below; they are never merged into development."""
     symbols = symbols or DEFAULT_REAL_UNIVERSE
     holdout = holdout or default_holdout_config()
 
@@ -178,7 +199,10 @@ def evaluate_real_step(
     df = prepare_training_frame(matrix, targets)
     feature_cols = get_feature_columns(df)
 
-    development_df, holdout_df = split_development_and_holdout(df, holdout, horizon_days, embargo_days)
+    partition = split_temporal_partitions(df, holdout, horizon_days, embargo_days)
+    development_df, holdout_df, post_holdout_df = (
+        partition.development_df, partition.holdout_df, partition.post_holdout_df
+    )
     if development_df.empty:
         raise ValueError("development set is empty after purge/embargo -- not enough history before the holdout period")
 
@@ -218,6 +242,7 @@ def evaluate_real_step(
             fold_results=[], development_df=development_df, holdout_df=holdout_df, feature_cols=feature_cols,
             champion_model_version=None, promoted=False,
             promotion_rationale="not enough development history to produce a single purged walk-forward fold",
+            post_holdout_df=post_holdout_df,
         )
 
     fold_ics = [r.metrics.get(PRIMARY_TARGET, {}).get("information_coefficient", float("nan")) for r in fold_results]
@@ -264,7 +289,7 @@ def evaluate_real_step(
     return RealEvaluationResult(
         fold_results=fold_results, development_df=development_df, holdout_df=holdout_df, feature_cols=feature_cols,
         champion_model_version=model_version, promoted=promoted, promotion_rationale=rationale,
-        fold_metrics_summary=fold_metrics_summary, robustness=robustness,
+        fold_metrics_summary=fold_metrics_summary, robustness=robustness, post_holdout_df=post_holdout_df,
     )
 
 
@@ -275,6 +300,7 @@ class RealDemoResult:
     n_rejected_orders: int
     rejection_reason_codes: list[str]
     backtest_period: tuple[str, str] | None
+    holdout_evaluation: HoldoutEvaluationResult | None = None
 
 
 def run_real_demo(
@@ -289,9 +315,21 @@ def run_real_demo(
     skip_ingestion: bool = False,
 ) -> RealDemoResult:
     """End-to-end V0.2 real-data run: ingest -> build-real-features ->
-    evaluate-real -> a genuine paper-trading backtest through the SAME
-    unmodified Portfolio/Risk/Execution engine V0.1 uses, over the latest
-    development-set walk-forward fold's validation window.
+    evaluate-real (pre-holdout development only) -> a diagnostic paper-
+    trading backtest through the SAME unmodified Portfolio/Risk/Execution
+    engine V0.1 uses, over the latest development-set walk-forward fold's
+    validation window -- THEN, only once model selection is completely
+    finished and the model is frozen, exactly one formal evaluation on the
+    untouched final holdout via ``backtesting.holdout.evaluate_on_holdout``.
+    The holdout result, not the development-fold backtest, is the genuine
+    final out-of-sample result; nothing here ever tunes anything in
+    response to it.
+
+    Ingestion (``start``..``end``) may run through "today" regardless of
+    where the holdout period falls -- ``evaluate_real_step`` partitions
+    the resulting data into pre-holdout development / holdout / post-
+    holdout (``backtesting.holdout.split_temporal_partitions``), and only
+    the pre-holdout region is ever used for model selection.
 
     ``skip_ingestion=True`` lets a caller (tests, or a re-run against
     already-ingested data) skip the four ``ingest_*`` network calls and
@@ -320,6 +358,13 @@ def run_real_demo(
     model_version = champion["model_version"] if champion is not None else evaluation.champion_model_version
     last_fold = evaluation.fold_results[-1]
 
+    # --- DIAGNOSTIC: paper-trading backtest over the last development
+    # fold's own validation window. This is still pre-holdout data the
+    # walk-forward process already saw the surrounding context of -- it
+    # demonstrates the full Portfolio/Risk/Execution pipeline working end
+    # to end (including the risk engine approving AND rejecting orders),
+    # but it is NOT the final out-of-sample result. See the holdout
+    # evaluation below for that.
     test_df = evaluation.development_df[
         (evaluation.development_df["timestamp"] >= last_fold.fold.validation_start)
         & (evaluation.development_df["timestamp"] <= last_fold.fold.validation_end)
@@ -336,7 +381,23 @@ def run_real_demo(
     backtest_period = (
         (str(test_df["timestamp"].min()), str(test_df["timestamp"].max())) if not test_df.empty else None
     )
+
+    # --- FINAL: the model is frozen (it is exactly the model that just
+    # went through champion qualification above -- nothing is retrained
+    # or re-selected here) and evaluated on the untouched holdout exactly
+    # once. This is the genuine final out-of-sample result. Every call is
+    # logged to holdout_access_log regardless of how many times real-demo
+    # itself is re-run -- the audit trail is the source of truth for how
+    # many times the holdout was actually touched.
+    holdout_evaluation = None
+    if not evaluation.holdout_df.empty:
+        holdout_evaluation = evaluate_on_holdout(
+            con, last_fold.trained, evaluation.holdout_df, evaluation.feature_cols, model_version,
+            purpose="real-demo CLI: final formal out-of-sample evaluation after model selection was completed",
+            feature_version=REAL_FEATURE_VERSION,
+        )
+
     return RealDemoResult(
         evaluation=evaluation, n_fills=len(result.fills), n_rejected_orders=len(result.rejected_orders),
-        rejection_reason_codes=reason_codes, backtest_period=backtest_period,
+        rejection_reason_codes=reason_codes, backtest_period=backtest_period, holdout_evaluation=holdout_evaluation,
     )
