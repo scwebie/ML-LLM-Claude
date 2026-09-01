@@ -302,8 +302,9 @@ def evaluate_real(
     symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
-    """V0.2: purged+embargoed walk-forward evaluation on the development set, then the V0.2
-    champion/challenger promotion decision. Never touches the final holdout period."""
+    """V0.2: purged+embargoed walk-forward evaluation on the PRE-HOLDOUT development set,
+    then the V0.2 champion/challenger promotion decision. Never touches the final holdout
+    or post-holdout regions (backtesting.holdout.split_temporal_partitions)."""
     configure_logging()
     import real_pipeline as rp
 
@@ -313,13 +314,25 @@ def evaluate_real(
     typer.echo(json.dumps(
         {
             "n_folds": len(evaluation.fold_results),
+            "fold_date_ranges": [
+                {
+                    "fold_id": r.fold.fold_id, "train_start": r.fold.train_start,
+                    "validation_start": r.fold.validation_start, "validation_end": r.fold.validation_end,
+                }
+                for r in evaluation.fold_results
+            ],
             "fold_metrics_summary": evaluation.fold_metrics_summary,
             "champion_model_version": evaluation.champion_model_version,
             "promoted": evaluation.promoted,
             "promotion_rationale": evaluation.promotion_rationale,
             "robustness": evaluation.robustness,
             "development_rows": len(evaluation.development_df),
+            "development_date_range": (
+                [str(evaluation.development_df["timestamp"].min()), str(evaluation.development_df["timestamp"].max())]
+                if not evaluation.development_df.empty else None
+            ),
             "holdout_rows_available_but_untouched": len(evaluation.holdout_df),
+            "post_holdout_rows_preserved_but_unused": len(evaluation.post_holdout_df),
         },
         indent=2, default=str,
     ))
@@ -336,8 +349,11 @@ def real_demo(
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
     """V0.2: the full real-data pipeline end to end -- ingest -> build-real-features ->
-    evaluate-real -> a genuine paper-trading backtest through the SAME Portfolio/Risk/
-    Execution engine V0.1 uses, over real, out-of-sample data. PAPER-TRADING ONLY."""
+    evaluate-real (pre-holdout model selection) -> a diagnostic paper-trading backtest
+    through the SAME Portfolio/Risk/Execution engine V0.1 uses -> exactly one final,
+    formal evaluation on the untouched holdout. PAPER-TRADING ONLY. Ingestion runs
+    through the given/default end date (today by default) even though that is after
+    the historical holdout -- see backtesting.holdout.split_temporal_partitions."""
     configure_logging()
     import real_pipeline as rp
 
@@ -347,16 +363,48 @@ def real_demo(
         con, symbol_list, _parse_date(start, datetime(2020, 1, 1)), _parse_date(end, datetime.now()),
         initial_cash=initial_cash, use_llm=use_llm, skip_ingestion=skip_ingestion,
     )
+    evaluation = result.evaluation
     typer.echo(json.dumps(
         {
-            "champion_model_version": result.evaluation.champion_model_version,
-            "promoted": result.evaluation.promoted,
-            "promotion_rationale": result.evaluation.promotion_rationale,
-            "fold_metrics_summary": result.evaluation.fold_metrics_summary,
-            "backtest_period": result.backtest_period,
-            "n_fills": result.n_fills,
-            "n_rejected_orders": result.n_rejected_orders,
-            "rejection_reason_codes": result.rejection_reason_codes,
+            "temporal_partition": {
+                "development_rows": len(evaluation.development_df),
+                "development_date_range": (
+                    [str(evaluation.development_df["timestamp"].min()), str(evaluation.development_df["timestamp"].max())]
+                    if not evaluation.development_df.empty else None
+                ),
+                "holdout_rows": len(evaluation.holdout_df),
+                "holdout_date_range": (
+                    [str(evaluation.holdout_df["timestamp"].min()), str(evaluation.holdout_df["timestamp"].max())]
+                    if not evaluation.holdout_df.empty else None
+                ),
+                "post_holdout_rows_preserved_but_unused": len(evaluation.post_holdout_df),
+                "post_holdout_date_range": (
+                    [str(evaluation.post_holdout_df["timestamp"].min()), str(evaluation.post_holdout_df["timestamp"].max())]
+                    if not evaluation.post_holdout_df.empty else None
+                ),
+            },
+            "fold_date_ranges": [
+                {
+                    "fold_id": r.fold.fold_id, "train_start": r.fold.train_start,
+                    "validation_start": r.fold.validation_start, "validation_end": r.fold.validation_end,
+                }
+                for r in evaluation.fold_results
+            ],
+            "champion_model_version": evaluation.champion_model_version,
+            "promoted": evaluation.promoted,
+            "promotion_rationale": evaluation.promotion_rationale,
+            "fold_metrics_summary": evaluation.fold_metrics_summary,
+            "diagnostic_backtest_period": result.backtest_period,
+            "diagnostic_n_fills": result.n_fills,
+            "diagnostic_n_rejected_orders": result.n_rejected_orders,
+            "diagnostic_rejection_reason_codes": result.rejection_reason_codes,
+            "final_holdout_evaluation": (
+                {
+                    "n_rows": result.holdout_evaluation.n_rows,
+                    "metrics": result.holdout_evaluation.metrics,
+                }
+                if result.holdout_evaluation is not None else None
+            ),
         },
         indent=2, default=str,
     ))

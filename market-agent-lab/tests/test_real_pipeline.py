@@ -105,3 +105,43 @@ def test_run_real_demo_with_skip_ingestion_completes_without_network(con):
     assert isinstance(result.n_fills, int)
     assert isinstance(result.n_rejected_orders, int)
     assert isinstance(result.rejection_reason_codes, list)
+
+    # 3. Current-date real-demo regression: the model was frozen after
+    # pre-holdout selection, then formally evaluated on the holdout
+    # exactly once (real-demo's new final stage) -- and that evaluation
+    # is logged.
+    assert result.holdout_evaluation is not None
+    assert result.holdout_evaluation.n_rows == len(result.evaluation.holdout_df)
+    log = con.execute("SELECT COUNT(*) FROM holdout_access_log").fetchone()[0]
+    assert log == 1
+
+
+def test_evaluate_real_step_never_crosses_holdout_when_data_extends_far_past_it(con):
+    """3. Current-date real-demo regression (direct reproduction of the
+    production failure): a holdout carved out of the MIDDLE of the seeded
+    calendar, with ~300 trading days of real post-holdout data after it --
+    exactly the shape a real-demo run against real ingestion (which keeps
+    running through "today", long after any realistic historical holdout)
+    actually has. evaluate_real_step must succeed, no fold may overlap
+    the holdout, and post_holdout_df must be preserved, non-empty, and
+    entirely after the holdout end."""
+    _seed_market_data(con)
+    rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
+
+    calendar = pd.bdate_range("2020-01-02", periods=1400)
+    holdout = HoldoutConfig(start_date=calendar[1000], end_date=calendar[1100])
+
+    evaluation = rp.evaluate_real_step(con, SYMBOLS, holdout=holdout, initial_train_fraction=0.6, validation_fraction=0.15)
+
+    assert not evaluation.development_df.empty
+    assert not evaluation.holdout_df.empty
+    assert not evaluation.post_holdout_df.empty
+
+    assert evaluation.development_df["timestamp"].max() < holdout.start_date
+    assert evaluation.holdout_df["timestamp"].min() >= holdout.start_date
+    assert evaluation.holdout_df["timestamp"].max() <= holdout.end_date
+    assert evaluation.post_holdout_df["timestamp"].min() > holdout.end_date
+
+    assert len(evaluation.fold_results) >= 1
+    for fold_result in evaluation.fold_results:
+        assert fold_result.fold.validation_end < holdout.start_date
