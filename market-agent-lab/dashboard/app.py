@@ -268,7 +268,7 @@ with tab_data_quality:
         st.dataframe(reconciliations.tail(300), use_container_width=True)
 
     st.subheader("Final holdout access audit trail")
-    st.caption("Every recorded access to the final, untouched holdout evaluation period -- should be sparse and deliberate.")
+    st.caption("Every recorded access to the historical holdout evaluation period -- should be sparse and deliberate. Note: this period has already been observed (V0.2's report) and is a USED historical test set, not an untouched one.")
     holdout_log = repo_v2.get_holdout_access_log(con)
     if holdout_log.empty:
         st.info("The holdout period has never been accessed in this database -- as expected before a final evaluation.")

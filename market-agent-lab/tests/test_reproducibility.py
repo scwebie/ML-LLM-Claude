@@ -223,3 +223,56 @@ def test_verify_artifact_reproducibility_raises_for_unknown_model_version():
         init_schema(con)
         with pytest.raises(KeyError):
             verify_artifact_reproducibility(con, "does_not_exist")
+
+
+def test_init_schema_migrates_a_pre_stage13_model_registry_table():
+    """A persistent DuckDB file created before V0.3 Stage 13 has a
+    model_registry table with only the original 14 columns (no
+    git_commit/target_definition_hash/random_seed/data_fingerprint/
+    artifact_hash). CREATE TABLE IF NOT EXISTS is a no-op against it, so
+    init_schema must migrate the five new columns in explicitly --
+    otherwise register_model's fixed-position INSERT breaks the moment
+    it's called against such a file."""
+    import duckdb
+
+    con = duckdb.connect(":memory:")  # NOT fresh_connection -- that already calls init_schema
+    try:
+        # Simulate the OLD (pre-Stage-13) schema by creating model_registry
+        # with exactly its original 14 columns, before init_schema ever runs.
+        con.execute(
+            """
+            CREATE TABLE model_registry (
+                model_version VARCHAR PRIMARY KEY,
+                role VARCHAR NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                feature_version VARCHAR NOT NULL,
+                feature_names_json VARCHAR NOT NULL,
+                hyperparameters_json VARCHAR NOT NULL,
+                training_period_start TIMESTAMP NOT NULL,
+                training_period_end TIMESTAMP NOT NULL,
+                validation_period_start TIMESTAMP NOT NULL,
+                validation_period_end TIMESTAMP NOT NULL,
+                test_period_start TIMESTAMP,
+                test_period_end TIMESTAMP,
+                metrics_json VARCHAR NOT NULL,
+                artifact_path VARCHAR NOT NULL
+            );
+            """
+        )
+        columns_before = {row[1] for row in con.execute("PRAGMA table_info('model_registry')").fetchall()}
+        assert "artifact_hash" not in columns_before
+
+        init_schema(con)  # runs the full DDL set including the migration -- must not raise
+
+        columns_after = {row[1] for row in con.execute("PRAGMA table_info('model_registry')").fetchall()}
+        assert {"git_commit", "target_definition_hash", "random_seed", "data_fingerprint", "artifact_hash"} <= columns_after
+
+        # And register_model must now work against this migrated table.
+        df, feature_cols = _training_frame()
+        train_df, val_df = _split(df)
+        trained = train_all_targets(train_df, val_df, feature_cols)
+        version = register_model(con, trained, "fv1", _periods(df, train_df, val_df), metrics={}, role="CHALLENGER")
+        _, record = load_model(con, version)
+        assert record["artifact_hash"] is not None
+    finally:
+        con.close()

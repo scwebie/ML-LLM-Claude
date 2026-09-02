@@ -297,45 +297,153 @@ def build_real_features(
     typer.echo(json.dumps(summary, indent=2, default=str))
 
 
+def _evaluate_development_json(con, symbol_list: list[str]) -> dict:
+    """Shared body of ``evaluate-real``/``evaluate-development`` (V0.3
+    Stage 14: these are the SAME command under two names -- ``evaluate-
+    development`` is the preferred V0.3 name; ``evaluate-real`` is kept
+    for backward compatibility). Purged+embargoed walk-forward evaluation
+    on the PRE-HOLDOUT development set only, then the champion/challenger
+    promotion decision. Never touches the final holdout or post-holdout
+    regions (backtesting.holdout.split_temporal_partitions) -- neither
+    test period's rows are ever read here, so this command is always safe
+    to re-run as many times as development requires."""
+    import real_pipeline as rp
+
+    evaluation = rp.evaluate_real_step(con, symbol_list)
+    return {
+        "n_folds": len(evaluation.fold_results),
+        "fold_date_ranges": [
+            {
+                "fold_id": r.fold.fold_id, "train_start": r.fold.train_start,
+                "validation_start": r.fold.validation_start, "validation_end": r.fold.validation_end,
+            }
+            for r in evaluation.fold_results
+        ],
+        "fold_metrics_summary": evaluation.fold_metrics_summary,
+        "sharpe_audit": evaluation.sharpe_audit,
+        "incumbent_champion_version_before_evaluation": evaluation.incumbent_champion_version_before_evaluation,
+        "challenger_model_version": evaluation.champion_model_version,
+        "champion_model_version": evaluation.champion_model_version,
+        "promoted": evaluation.promoted,
+        "promotion_rationale": evaluation.promotion_rationale,
+        "robustness": evaluation.robustness,
+        "development_rows": len(evaluation.development_df),
+        "development_date_range": (
+            [str(evaluation.development_df["timestamp"].min()), str(evaluation.development_df["timestamp"].max())]
+            if not evaluation.development_df.empty else None
+        ),
+        # V0.3 research rule: the 2024-07-01..2025-06-30 historical holdout
+        # has already been observed (V0.2's report) and must never again be
+        # described as "untouched" -- it is a USED historical test set.
+        # These counts only report that THIS command does not read those
+        # rows for model selection; see evaluate-historical-holdout for the
+        # one place that formally scores a model against it.
+        "holdout_rows_not_read_by_this_command": len(evaluation.holdout_df),
+        "post_holdout_rows_not_read_by_this_command": len(evaluation.post_holdout_df),
+    }
+
+
 @app.command()
 def evaluate_real(
     symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
     db_path: str = typer.Option(None, help="Override the DuckDB file path"),
 ) -> None:
-    """V0.2: purged+embargoed walk-forward evaluation on the PRE-HOLDOUT development set,
-    then the V0.2 champion/challenger promotion decision. Never touches the final holdout
-    or post-holdout regions (backtesting.holdout.split_temporal_partitions)."""
+    """V0.2/V0.3: purged+embargoed walk-forward evaluation on the PRE-HOLDOUT development
+    set, then the champion/challenger promotion decision. Never touches the final holdout
+    or post-holdout regions. Kept for backward compatibility -- the preferred V0.3 name for
+    this exact command is `evaluate-development`."""
     configure_logging()
     import real_pipeline as rp
 
     con = get_connection(db_path)
     symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
-    evaluation = rp.evaluate_real_step(con, symbol_list)
+    typer.echo(json.dumps(_evaluate_development_json(con, symbol_list), indent=2, default=str))
+
+
+@app.command()
+def evaluate_development(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.3 Stage 14 preferred name for `evaluate-real`: purged+embargoed walk-forward
+    evaluation on the PRE-HOLDOUT development set only, then the champion/challenger
+    promotion decision. Identical behavior to `evaluate-real` -- this command NEVER touches
+    the final historical holdout or the post-holdout forward-paper region; see
+    `evaluate-historical-holdout` and `evaluate-forward-paper` for those, each a separate,
+    on-demand, audit-logged, no-retraining command."""
+    configure_logging()
+    import real_pipeline as rp
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+    typer.echo(json.dumps(_evaluate_development_json(con, symbol_list), indent=2, default=str))
+
+
+@app.command()
+def evaluate_historical_holdout(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.3 Stage 14: on-demand, standalone evaluation of the ALREADY-FROZEN champion
+    against the fixed historical holdout period (core.config.settings.holdout_start_date/
+    holdout_end_date). THIS PERIOD HAS ALREADY BEEN OBSERVED (V0.2's report) -- it is a USED
+    historical test set, never described as "untouched" in V0.3. Do not run this repeatedly
+    as part of model development, and do not tune, select, or redesign models in response to
+    its result. Performs NO training and NO model selection -- it only loads the frozen
+    champion's stored artifact and scores it once. Every call is logged to
+    holdout_access_log, separately from evaluate-development/evaluate-real, so a reviewer can
+    confirm exactly how many times the historical holdout was actually touched."""
+    configure_logging()
+    import real_pipeline as rp
+    from backtesting.holdout import evaluate_on_holdout
+    from models.registry import get_champion, load_model
+    from models.train import TrainedModels
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+
+    champion = get_champion(con)
+    if champion is None:
+        typer.echo(json.dumps(
+            {
+                "status": "NO_CHAMPION",
+                "reason": "no champion model exists yet -- run evaluate-development (development-only "
+                          "selection) first",
+            },
+            indent=2,
+        ))
+        raise typer.Exit(code=1)
+    model_version = champion["model_version"]
+    boosters, record = load_model(con, model_version)
+    feature_cols = record["feature_names"]
+
+    holdout_df = rp.prepare_historical_holdout_data_step(con, symbol_list)
+    if holdout_df.empty:
+        typer.echo(json.dumps(
+            {
+                "status": "NO_HOLDOUT_DATA",
+                "reason": "no rows exist inside the configured holdout window -- ingest historical data "
+                          "covering it first",
+                "model_version": model_version,
+            },
+            indent=2,
+        ))
+        raise typer.Exit(code=1)
+
+    result = evaluate_on_holdout(
+        con, TrainedModels(boosters=boosters), holdout_df, feature_cols, model_version,
+        purpose="evaluate-historical-holdout CLI: on-demand formal evaluation of the frozen champion "
+                "against the fixed, ALREADY-OBSERVED historical holdout period",
+    )
     typer.echo(json.dumps(
         {
-            "n_folds": len(evaluation.fold_results),
-            "fold_date_ranges": [
-                {
-                    "fold_id": r.fold.fold_id, "train_start": r.fold.train_start,
-                    "validation_start": r.fold.validation_start, "validation_end": r.fold.validation_end,
-                }
-                for r in evaluation.fold_results
-            ],
-            "fold_metrics_summary": evaluation.fold_metrics_summary,
-            "sharpe_audit": evaluation.sharpe_audit,
-            "incumbent_champion_version_before_evaluation": evaluation.incumbent_champion_version_before_evaluation,
-            "challenger_model_version": evaluation.champion_model_version,
-            "champion_model_version": evaluation.champion_model_version,
-            "promoted": evaluation.promoted,
-            "promotion_rationale": evaluation.promotion_rationale,
-            "robustness": evaluation.robustness,
-            "development_rows": len(evaluation.development_df),
-            "development_date_range": (
-                [str(evaluation.development_df["timestamp"].min()), str(evaluation.development_df["timestamp"].max())]
-                if not evaluation.development_df.empty else None
-            ),
-            "holdout_rows_available_but_untouched": len(evaluation.holdout_df),
-            "post_holdout_rows_preserved_but_unused": len(evaluation.post_holdout_df),
+            "research_status": "USED HISTORICAL HOLDOUT -- already observed; do not tune, select, or "
+                                "redesign models in response to this result",
+            "frozen_model_version": model_version,
+            "holdout_rows": result.n_rows,
+            "holdout_date_range": [str(result.log_entry.holdout_start), str(result.log_entry.holdout_end)],
+            "metrics": result.metrics,
+            "access_log_id": result.log_entry.id,
         },
         indent=2, default=str,
     ))
@@ -427,10 +535,17 @@ def real_demo(
 ) -> None:
     """V0.2: the full real-data pipeline end to end -- ingest -> build-real-features ->
     evaluate-real (pre-holdout model selection) -> a diagnostic paper-trading backtest
-    through the SAME Portfolio/Risk/Execution engine V0.1 uses -> exactly one final,
-    formal evaluation on the untouched holdout. PAPER-TRADING ONLY. Ingestion runs
-    through the given/default end date (today by default) even though that is after
-    the historical holdout -- see backtesting.holdout.split_temporal_partitions."""
+    through the SAME Portfolio/Risk/Execution engine V0.1 uses -> one formal evaluation on
+    the historical holdout period. PAPER-TRADING ONLY. Ingestion runs through the given/
+    default end date (today by default) even though that is after the historical holdout --
+    see backtesting.holdout.split_temporal_partitions.
+
+    V0.3 CAUTION: this command touches the historical holdout on EVERY run (it is not the
+    untouched period V0.2's report evaluated -- that period has already been observed and
+    is now a USED historical test set). For V0.3 development work, prefer running
+    `evaluate-development` on its own (never touches either test period) and only run
+    `evaluate-historical-holdout` deliberately, on demand, when a formal historical-holdout
+    number is actually needed."""
     configure_logging()
     import real_pipeline as rp
 

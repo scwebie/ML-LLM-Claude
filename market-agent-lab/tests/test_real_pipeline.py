@@ -231,3 +231,58 @@ def test_prepare_forward_paper_data_step_and_evaluate_end_to_end(con):
     assert result.model_version == model_version
     log_count = con.execute("SELECT COUNT(*) FROM forward_paper_access_log").fetchone()[0]
     assert log_count == 1
+
+
+def test_prepare_historical_holdout_data_step_and_evaluate_end_to_end(con):
+    """V0.3 Stage 14 end-to-end: development-only selection freezes a
+    champion (evaluate_real_step, exactly as production does), then the
+    STANDALONE historical-holdout data step (no training, no fold
+    generation, no development-side model selection re-run) builds
+    holdout_df, and evaluate_on_holdout scores the already-frozen model
+    against it exactly once -- exercising the same standalone path the
+    `evaluate-historical-holdout` CLI command uses."""
+    from backtesting.holdout import evaluate_on_holdout
+    from models.registry import get_champion, load_model, promote_to_champion
+    from models.train import TrainedModels
+
+    _seed_market_data(con)
+    rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
+
+    calendar = pd.bdate_range("2020-01-02", periods=1400)
+    holdout = HoldoutConfig(start_date=calendar[1000], end_date=calendar[1100])
+
+    evaluation = rp.evaluate_real_step(con, SYMBOLS, holdout=holdout, initial_train_fraction=0.6, validation_fraction=0.15)
+    assert evaluation.champion_model_version is not None
+    if not evaluation.promoted:
+        promote_to_champion(con, evaluation.champion_model_version)  # force a frozen champion to exist for this test
+
+    holdout_df = rp.prepare_historical_holdout_data_step(con, SYMBOLS, holdout=holdout)
+    assert not holdout_df.empty
+    assert (holdout_df["timestamp"] >= holdout.start_date).all()
+    assert (holdout_df["timestamp"] <= holdout.end_date).all()
+
+    champion = get_champion(con)
+    model_version = champion["model_version"]
+    boosters, record = load_model(con, model_version)
+    result = evaluate_on_holdout(
+        con, TrainedModels(boosters=boosters), holdout_df, record["feature_names"], model_version, "V0.3 Stage 14 test"
+    )
+
+    assert result.n_rows == len(holdout_df)
+    log_count = con.execute("SELECT COUNT(*) FROM holdout_access_log").fetchone()[0]
+    assert log_count == 1
+
+
+def test_prepare_historical_holdout_data_step_never_returns_development_rows(con):
+    """The standalone holdout data step must return ONLY rows inside the
+    configured holdout window -- never any pre-holdout development row,
+    regardless of how the caller re-derives partitioning."""
+    _seed_market_data(con)
+    rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
+
+    calendar = pd.bdate_range("2020-01-02", periods=1400)
+    holdout = HoldoutConfig(start_date=calendar[1000], end_date=calendar[1100])
+
+    holdout_df = rp.prepare_historical_holdout_data_step(con, SYMBOLS, holdout=holdout)
+    assert not holdout_df.empty
+    assert not (holdout_df["timestamp"] < holdout.start_date).any()

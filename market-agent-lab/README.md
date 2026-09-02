@@ -232,10 +232,12 @@ the LLM never controls risk or execution.
 * **Point-in-time discipline** across prices, fundamentals, macro, news,
   events, and universe membership -- see
   [`docs/point_in_time_data.md`](docs/point_in_time_data.md).
-* **Purged + embargoed + nested walk-forward evaluation, a final
-  untouched holdout, a ten-piece robustness suite, and a stricter
-  champion/challenger gate** -- see
-  [`docs/evaluation_v02.md`](docs/evaluation_v02.md).
+* **Purged + embargoed + nested walk-forward evaluation, a fixed
+  historical holdout period, a ten-piece robustness suite, and a
+  stricter champion/challenger gate** -- see
+  [`docs/evaluation_v02.md`](docs/evaluation_v02.md). (V0.3 note: that
+  holdout has since been formally evaluated once -- see the V0.3 section
+  below -- and is now a *used* historical test set, not an untouched one.)
 * **A read-only prediction-market signal** (Polymarket) with an absolute,
   structurally-tested prohibition on any execution/wagering/wallet/auth
   capability.
@@ -278,3 +280,75 @@ default 20-symbol universe): engineering results, data coverage,
 evaluation methodology, model performance vs. benchmarks, robustness
 results, and explicit safety confirmations -- reported without
 cherry-picking, per the project brief.
+
+## Version 0.3 -- scientific validity, instability diagnosis, reproducibility
+
+**Still paper-trading / simulation only.** The V0.2 holdout result above
+has been observed once and is treated from V0.3 onward as a **used**
+historical test set -- never re-tuned against, never re-evaluated
+repeatedly, and never again described as "untouched." V0.3's focus is
+diagnosing WHY the V0.2 model didn't generalise convincingly, using
+**development data only**.
+
+### What's new
+
+* **Fixed a champion/challenger self-promotion bug** where a deterministic
+  retrain on unchanged data could report `promoted=true` against a
+  vacuous, identical-metrics "challenger" -- see
+  `learning/champion_challenger_v2.py`.
+* **Audited and fixed the Sharpe ratio calculation** -- the previously
+  reported Sharpe (6.649) was computed from an overlapping multi-day
+  target series misread as independent daily returns. A genuinely
+  chronological one-row-per-trading-day portfolio series now backs every
+  Sharpe number -- see `backtesting/daily_portfolio.py`.
+* **Development-only diagnostics**: IC by year, market regime, and
+  symbol; IC decay; signal breadth (`backtesting/development_diagnostics.py`).
+* **Feature-family ablation** with per-fold IC, bootstrap CIs, and
+  genuine daily Sharpe (`backtesting/ablation_v3.py`).
+* **Feature-importance stability** across folds (native + permutation
+  importance, sign-flip and one-period-only detection;
+  `backtesting/feature_stability.py`).
+* **Five automated negative controls** (shuffled target, time-shifted
+  target, random feature, a deliberate future-data leak the harness must
+  catch, and symbol-label permutation; `backtesting/negative_controls.py`).
+* **Re-audited purge/embargo boundaries** derived directly from the same
+  masks training actually uses (`backtesting/purge_audit.py`).
+* **Finite-permutation-corrected p-values**, IC information ratio,
+  effective sample size under target overlap, and probabilistic/deflated
+  Sharpe ratios (`backtesting/statistical_significance.py`).
+* **Investigated Polymarket event-probability coverage**: only
+  single-snapshot data is available (no historical archive endpoint
+  exists), so those feature columns are correctly absent from historical
+  training rows rather than backfilled -- see
+  `data/event_coverage_diagnostics.py`.
+* **A standalone, on-demand `evaluate-forward-paper` command** that loads
+  the already-frozen champion and scores it against the post-holdout
+  period exactly once, performing no training or model selection --
+  see `backtesting/forward_paper.py`.
+* **Simple-model benchmarks** (ridge, logistic, momentum, mean-reversion,
+  equal-weight composite) run on the identical purge/embargo splits as
+  LightGBM (`backtesting/simple_benchmarks.py`).
+* **Transaction-cost, execution-delay, and rebalance-cadence stress
+  tests** on a fixed, non-tuned grid (`backtesting/cost_delay_stress.py`).
+* **Model registry reproducibility provenance** -- git commit,
+  target-definition hash, random seed, data fingerprint, and artifact
+  hash on every registered model, plus a `verify-reproducibility` CLI
+  command (`models/reproducibility.py`).
+* **Split CLI commands** so development, historical-holdout, and
+  forward-paper evaluation are never conflated: `evaluate-development`
+  (alias of `evaluate-real`, never touches either test period),
+  `evaluate-historical-holdout` (standalone, on-demand, audit-logged,
+  no retraining), `evaluate-forward-paper` (same discipline, post-holdout
+  period).
+
+### V0.3 research report
+
+[`docs/V03_RESEARCH_REPORT.md`](docs/V03_RESEARCH_REPORT.md) is generated
+from code (`scripts/generate_v03_report.py`) against this project's real,
+already-ingested data. It separates **DEVELOPMENT RESULTS** (safe to
+re-run any number of times), **USED HISTORICAL HOLDOUT RESULTS** (read
+from the existing access log, never re-evaluated to produce the report),
+and **FUTURE FORWARD-PAPER RESULTS** (reserved, not yet evaluated) --
+including results that are not favorable (e.g. two of five negative
+controls did not cleanly pass on real data, and feature importance
+proved unstable across folds), reported honestly rather than omitted.

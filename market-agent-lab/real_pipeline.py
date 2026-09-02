@@ -200,6 +200,40 @@ def prepare_forward_paper_data_step(
     return partition.post_holdout_df, market
 
 
+def prepare_historical_holdout_data_step(
+    con: duckdb.DuckDBPyConnection,
+    symbols: list[str] | None = None,
+    feature_version: str = REAL_FEATURE_VERSION,
+    holdout: HoldoutConfig | None = None,
+    horizon_days: int = MAX_TARGET_HORIZON_DAYS,
+    embargo_days: int = DEFAULT_EMBARGO_DAYS,
+) -> pd.DataFrame:
+    """V0.3 Stage 14: builds ONLY ``holdout_df`` -- no walk-forward fold
+    generation, no training, no champion/challenger call. Mirrors
+    :func:`prepare_forward_paper_data_step`'s shape exactly, but for the
+    FIXED HISTORICAL HOLDOUT period instead of the post-holdout forward
+    period. Exists so ``evaluate-historical-holdout`` can be run as a
+    standalone, on-demand, auditable command -- never bundled into a
+    routine development run, which would touch the (already-observed,
+    used) historical holdout every time development is re-run."""
+    symbols = symbols or DEFAULT_REAL_UNIVERSE
+    holdout = holdout or default_holdout_config()
+
+    matrix = load_feature_matrix(con, feature_version, symbols=symbols)
+    if matrix.empty:
+        raise ValueError(f"no stored feature matrix for feature_version={feature_version!r} -- run build-real-features first")
+
+    market = repo.get_market_observations(con, symbols=symbols)
+    benchmark = repo.get_market_observations(con, symbols=[REAL_BENCHMARK_SYMBOL])
+    if benchmark.empty:
+        raise ValueError(f"no benchmark ({REAL_BENCHMARK_SYMBOL}) price data -- run ingest-prices first")
+    targets = compute_excess_return_targets(market, benchmark)
+    df = prepare_training_frame(matrix, targets)
+
+    partition = split_temporal_partitions(df, holdout, horizon_days, embargo_days)
+    return partition.holdout_df
+
+
 def evaluate_real_step(
     con: duckdb.DuckDBPyConnection,
     symbols: list[str] | None = None,
@@ -373,10 +407,19 @@ def run_real_demo(
     engine V0.1 uses, over the latest development-set walk-forward fold's
     validation window -- THEN, only once model selection is completely
     finished and the model is frozen, exactly one formal evaluation on the
-    untouched final holdout via ``backtesting.holdout.evaluate_on_holdout``.
+    historical holdout via ``backtesting.holdout.evaluate_on_holdout``.
     The holdout result, not the development-fold backtest, is the genuine
     final out-of-sample result; nothing here ever tunes anything in
     response to it.
+
+    V0.3 NOTE: this function touches the historical holdout on EVERY call
+    -- that period has already been observed once (V0.2's report) and is
+    a USED historical test set, never described here as "untouched". For
+    V0.3 development iteration, prefer ``evaluate_real_step`` on its own
+    (never touches either test period) and call
+    ``backtesting.holdout.evaluate_on_holdout`` (via the standalone
+    ``evaluate-historical-holdout`` CLI command) only when a formal
+    historical-holdout number is actually needed.
 
     Ingestion (``start``..``end``) may run through "today" regardless of
     where the holdout period falls -- ``evaluate_real_step`` partitions
@@ -437,8 +480,8 @@ def run_real_demo(
 
     # --- FINAL: the model is frozen (it is exactly the model that just
     # went through champion qualification above -- nothing is retrained
-    # or re-selected here) and evaluated on the untouched holdout exactly
-    # once. This is the genuine final out-of-sample result. Every call is
+    # or re-selected here) and evaluated on the historical holdout exactly
+    # once per call. This is the genuine final out-of-sample result. Every call is
     # logged to holdout_access_log regardless of how many times real-demo
     # itself is re-run -- the audit trail is the source of truth for how
     # many times the holdout was actually touched.

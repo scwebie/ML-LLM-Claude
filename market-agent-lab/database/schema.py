@@ -462,10 +462,28 @@ V02_DDL_STATEMENTS: list[str] = [
 ]
 
 
+# V0.3 Stage 13 added five reproducibility columns to model_registry.
+# ``CREATE TABLE IF NOT EXISTS`` is a no-op against a DuckDB file that
+# already has the table from before that change (e.g. a persistent
+# data_store/duckdb/*.duckdb from an earlier V0.2/V0.3 run), so those
+# columns must be migrated in explicitly -- otherwise upsert_model_registry
+# (a fixed-position INSERT) fails against the older, narrower table the
+# moment any new model is registered into that file.
+MIGRATION_STATEMENTS: list[str] = [
+    "ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS git_commit VARCHAR;",
+    "ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS target_definition_hash VARCHAR;",
+    "ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS random_seed INTEGER;",
+    "ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS data_fingerprint VARCHAR;",
+    "ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS artifact_hash VARCHAR;",
+]
+
+
 def init_schema(con) -> None:  # noqa: ANN001 - duckdb.DuckDBPyConnection
     for statement in DDL_STATEMENTS:
         con.execute(statement)
     for statement in V02_DDL_STATEMENTS:
+        con.execute(statement)
+    for statement in MIGRATION_STATEMENTS:
         con.execute(statement)
     con.execute(
         "INSERT INTO kill_switch_state (id, engaged, reason, updated_at) "
