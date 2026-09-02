@@ -322,6 +322,7 @@ def evaluate_real(
                 for r in evaluation.fold_results
             ],
             "fold_metrics_summary": evaluation.fold_metrics_summary,
+            "sharpe_audit": evaluation.sharpe_audit,
             "incumbent_champion_version_before_evaluation": evaluation.incumbent_champion_version_before_evaluation,
             "challenger_model_version": evaluation.champion_model_version,
             "champion_model_version": evaluation.champion_model_version,
@@ -398,6 +399,7 @@ def real_demo(
             "promoted": evaluation.promoted,
             "promotion_rationale": evaluation.promotion_rationale,
             "fold_metrics_summary": evaluation.fold_metrics_summary,
+            "sharpe_audit": evaluation.sharpe_audit,
             "diagnostic_backtest_period": result.backtest_period,
             "diagnostic_n_fills": result.n_fills,
             "diagnostic_n_rejected_orders": result.n_rejected_orders,

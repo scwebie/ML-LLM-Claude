@@ -51,6 +51,10 @@ from datetime import datetime
 import duckdb
 import pandas as pd
 
+from backtesting.daily_portfolio import (
+    build_daily_rebalanced_portfolio_returns,
+    sharpe_audit_report,
+)
 from backtesting.engine import run_ml_strategy_backtest
 from backtesting.holdout import (
     HoldoutConfig,
@@ -60,7 +64,6 @@ from backtesting.holdout import (
     evaluate_on_holdout,
     split_temporal_partitions,
 )
-from backtesting.metrics import sharpe_ratio
 from backtesting.purged_walk_forward import (
     DEFAULT_EMBARGO_DAYS,
     MAX_TARGET_HORIZON_DAYS,
@@ -71,7 +74,6 @@ from backtesting.purged_walk_forward import (
     run_purged_walk_forward,
 )
 from backtesting.robustness import (
-    build_quantile_portfolio_returns,
     permutation_test_ic,
     rank_ic_report,
 )
@@ -161,6 +163,7 @@ class RealEvaluationResult:
     robustness: dict = field(default_factory=dict)
     post_holdout_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     incumbent_champion_version_before_evaluation: str | None = None
+    sharpe_audit: dict = field(default_factory=dict)
 
 
 def evaluate_real_step(
@@ -262,15 +265,19 @@ def evaluate_real_step(
 
     # An initial-champion candidate must clear a real backtest-level Sharpe,
     # not just IC (learning/initial_qualification.py) -- compute one from a
-    # simple quantile long/short portfolio built off this fold's own
-    # out-of-sample predictions, since PurgedFoldResult.metrics never
-    # carries a Sharpe on its own (see models.evaluate.evaluate_regression).
+    # GENUINELY CHRONOLOGICAL DAILY portfolio return series (V0.3 Stage 2;
+    # see backtesting/daily_portfolio.py's module docstring for the audit
+    # of why the previous build_quantile_portfolio_returns-based Sharpe was
+    # wrong: it sampled overlapping multi-day-forward targets at a daily
+    # step and annualised with sqrt(252) as if they were independent daily
+    # returns, inflating Sharpe by roughly sqrt(horizon_days)x).
     metrics = dict(last_fold.metrics)
     reg_metrics = dict(metrics.get(PRIMARY_TARGET, {}))
-    if not eval_frame.empty:
-        portfolio_returns = build_quantile_portfolio_returns(eval_frame, PRIMARY_TARGET, pred_col)
-        if not portfolio_returns.empty:
-            reg_metrics["sharpe_ratio"] = sharpe_ratio(portfolio_returns["gross_return"])
+    sharpe_audit: dict = {}
+    daily_portfolio_returns = build_daily_rebalanced_portfolio_returns(last_fold.predictions, market, pred_col)
+    sharpe_audit = sharpe_audit_report(daily_portfolio_returns)
+    if sharpe_audit["n_observations"] > 0:
+        reg_metrics["sharpe_ratio"] = sharpe_audit["gross_sharpe"]
     metrics[PRIMARY_TARGET] = reg_metrics
 
     periods = ModelPeriods(
@@ -301,6 +308,7 @@ def evaluate_real_step(
         champion_model_version=model_version, promoted=promoted, promotion_rationale=rationale,
         fold_metrics_summary=fold_metrics_summary, robustness=robustness, post_holdout_df=post_holdout_df,
         incumbent_champion_version_before_evaluation=champion_record["model_version"] if champion_record else None,
+        sharpe_audit=sharpe_audit,
     )
 
 

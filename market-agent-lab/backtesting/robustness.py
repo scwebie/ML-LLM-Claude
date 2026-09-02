@@ -385,7 +385,21 @@ def build_quantile_portfolio_returns(df: pd.DataFrame, target_col: str, pred_col
     and realises ``target_col`` (the actual forward excess return).
     Returns one row per date with ``gross_return`` and ``turnover``
     (the fraction of long+short names that changed since the prior
-    rebalance -- the input transaction-cost stress testing scales against)."""
+    rebalance -- the input transaction-cost stress testing scales against).
+
+    **Do not feed this into ``sharpe_ratio()`` for a reported annualised
+    Sharpe** (V0.3 Stage 2 audit finding). When ``target_col`` is a
+    multi-day forward target (``excess_return_5d``/``excess_return_20d``,
+    the only targets this pipeline has), consecutive rows here overlap --
+    each shares nearly all of its underlying price window with its
+    neighbours -- so the series is heavily autocorrelated, understating
+    its true sample volatility, and ``sqrt(252)`` annualisation assumes
+    252 INDEPENDENT one-day periods a year, which this series does not
+    have. Both effects inflate an annualised Sharpe computed this way; use
+    ``backtesting.daily_portfolio.build_daily_rebalanced_portfolio_returns``
+    + ``sharpe_audit_report`` for a genuine one, and keep this function
+    only for the relative-degradation diagnostics it was built for
+    (``cost_stress_test``, ``execution_delay_stress_test``)."""
     rows: list[dict] = []
     prev_long: set[str] = set()
     prev_short: set[str] = set()

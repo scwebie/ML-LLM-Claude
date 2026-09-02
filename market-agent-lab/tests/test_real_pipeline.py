@@ -107,14 +107,25 @@ def test_repeated_evaluate_real_cannot_self_promote_against_unchanged_data(con):
 
     V0.3 Stage 1 closes this: a challenger whose validation window does
     not extend past the incumbent's is now rejected outright, before any
-    metric is even compared."""
+    metric is even compared.
+
+    Whether this seeded fixture's first challenger organically clears the
+    initial-qualification bar depends on the (now honest, post-Stage-2-fix)
+    Sharpe computed from its own synthetic random walk -- not the point of
+    this test. What matters here is the SECOND run's behaviour once an
+    incumbent exists, so the incumbent is installed directly if the first
+    run didn't already produce one."""
+    from models.registry import promote_to_champion
+
     _seed_market_data(con)
     rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
 
     first = rp.evaluate_real_step(con, SYMBOLS, initial_train_fraction=0.6, validation_fraction=0.15)
     assert first.champion_model_version is not None
-    assert first.promoted is True  # this seeded fixture's first challenger clears initial qualification
+    if not first.promoted:
+        promote_to_champion(con, first.champion_model_version)
     first_champion = repo.get_champion(con)["model_version"]
+    assert first_champion == first.champion_model_version
 
     second = rp.evaluate_real_step(con, SYMBOLS, initial_train_fraction=0.6, validation_fraction=0.15)
     # Same development data in, same purged folds out -- the second run's
@@ -122,6 +133,7 @@ def test_repeated_evaluate_real_cannot_self_promote_against_unchanged_data(con):
     assert second.champion_model_version != first.champion_model_version  # genuinely new version, never a literal collision
     assert second.promoted is False
     assert "no new development data" in second.promotion_rationale
+    assert repo.get_champion(con)["model_version"] == first_champion  # incumbent unchanged by the vacuous re-run
 
     # The incumbent must be completely unchanged by the vacuous re-run.
     assert repo.get_champion(con)["model_version"] == first_champion
