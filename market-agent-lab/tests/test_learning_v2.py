@@ -175,9 +175,12 @@ def test_decide_promotion_v2_promotes_strong_first_challenger_no_champion():
     assert "passed every initial-qualification criterion" in rationale
 
 
-def test_decide_promotion_v2_delegates_to_v01_gate_when_champion_exists():
-    """With an existing champion, v2 must behave exactly like V0.1's
-    decide_promotion (the ongoing comparison, not the one-off bar)."""
+def test_decide_promotion_v2_mirrors_v01_thresholds_when_champion_exists():
+    """With an existing champion, v2 runs its own comparison (not a
+    delegation to V0.1's decide_promotion -- that function hardcodes
+    excess_return_5d/positive_5d regardless of target_col, see the
+    module docstring) but must reproduce the exact same threshold
+    behaviour as V0.1's gate when scored on the same target."""
     challenger = {
         "excess_return_5d": {"information_coefficient": 0.10, "sharpe_ratio": 2.0},
         "positive_5d": {"brier_score": 0.20},
@@ -194,6 +197,32 @@ def test_decide_promotion_v2_delegates_to_v01_gate_when_champion_exists():
     )
     assert promoted is False
     assert "drawdown" in rationale
+
+
+def test_decide_promotion_v2_scores_on_target_col_not_hardcoded_excess_return_5d():
+    """Regression test for a reported production bug: the promotion
+    comparison compared excess_return_5d regardless of target_col, so a
+    challenger's real (excess_return_20d) IC never actually decided
+    anything -- a challenger with a terrible 5d IC but a good 20d IC would
+    be wrongly rejected, and vice versa. Construct exactly that trap: if
+    the 5d numbers were read, this challenger is rejected outright
+    (5d IC -0.90 < the minimum); if target_col is honoured, it is
+    correctly evaluated -- and promoted -- on its real 0.20 20d IC."""
+    challenger = {
+        "excess_return_5d": {"information_coefficient": -0.90, "sharpe_ratio": -5.0},
+        "excess_return_20d": {"information_coefficient": 0.20, "sharpe_ratio": 1.5},
+        "positive_20d": {"brier_score": 0.20},
+    }
+    champion = {
+        "excess_return_5d": {"information_coefficient": 0.99, "sharpe_ratio": 9.0},
+        "excess_return_20d": {"information_coefficient": 0.05, "sharpe_ratio": 0.5},
+        "positive_20d": {"brier_score": 0.20},
+    }
+    promoted, rationale = decide_promotion_v2(challenger, champion, pd.DataFrame(), target_col="excess_return_20d")
+    assert promoted is True
+    assert "IC 0.2000" in rationale
+    assert "champion 0.0500" in rationale
+    assert "0.9000" not in rationale  # the 5d numbers must never leak into a 20d-scored decision
 
 
 # --- run_promotion_cycle_v2 (full integration, real trained models) -----------------------------
@@ -264,3 +293,57 @@ def test_run_promotion_cycle_v2_promotes_strong_initial_model_and_becomes_champi
     champion = repo.get_champion(con)
     assert champion is not None
     assert champion["model_version"] == model_version
+
+
+def test_run_promotion_cycle_v2_asserts_challenger_never_equals_existing_champion(con):
+    """Regression test for the reported "challenger metrics exactly equal
+    champion metrics" production symptom: if a challenger_version is ever
+    identical to the incumbent champion's model_version (e.g. a
+    model-registry versioning collision, or two databases' registries
+    being conflated), run_promotion_cycle_v2 must refuse to silently
+    "compare" a model against itself -- every criterion would trivially
+    pass since every delta is exactly zero, which is never a legitimate
+    promotion decision."""
+    df = _synthetic_feature_target_frame()
+    feature_cols = ["f1", "f2"]
+    trained = train_all_targets(df.iloc[:500], df.iloc[500:600], feature_cols)
+    periods = ModelPeriods(
+        training_start=df["timestamp"].iloc[0], training_end=df["timestamp"].iloc[499],
+        validation_start=df["timestamp"].iloc[500], validation_end=df["timestamp"].iloc[599],
+    )
+    metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
+    model_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
+
+    strong_predictions = _strong_predictions_df()
+    promoted, _ = run_promotion_cycle_v2(con, model_version, metrics, strong_predictions)
+    assert promoted is True  # model_version is now CHAMPION
+
+    # Re-run the promotion cycle but hand it the SAME version string as
+    # the challenger under evaluation -- exactly what a colliding
+    # model_version would produce.
+    with pytest.raises(AssertionError, match="never be legitimately compared against itself"):
+        run_promotion_cycle_v2(con, model_version, metrics, strong_predictions)
+
+
+def test_run_promotion_cycle_v2_allows_a_genuinely_different_challenger_version(con):
+    """Sanity check alongside the self-comparison guard above: a
+    challenger with a version that differs from the incumbent champion's
+    must still be compared normally, not blocked by the new assertion."""
+    df = _synthetic_feature_target_frame()
+    feature_cols = ["f1", "f2"]
+    trained = train_all_targets(df.iloc[:500], df.iloc[500:600], feature_cols)
+    periods = ModelPeriods(
+        training_start=df["timestamp"].iloc[0], training_end=df["timestamp"].iloc[499],
+        validation_start=df["timestamp"].iloc[500], validation_end=df["timestamp"].iloc[599],
+    )
+    metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
+    first_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
+    strong_predictions = _strong_predictions_df()
+    promoted, _ = run_promotion_cycle_v2(con, first_version, metrics, strong_predictions)
+    assert promoted is True
+
+    second_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
+    assert second_version != first_version
+    promoted, rationale = run_promotion_cycle_v2(con, second_version, metrics, strong_predictions)
+    assert promoted is True  # identical metrics still legitimately pass every criterion
+    assert "IC 0.6000" in rationale
