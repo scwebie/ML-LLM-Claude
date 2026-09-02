@@ -342,6 +342,60 @@ def evaluate_real(
 
 
 @app.command()
+def evaluate_forward_paper(
+    symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.3 Stage 10: FORWARD PAPER EVALUATION. Evaluates the model that is ALREADY the
+    champion (selected entirely on development data by evaluate-real, before this command
+    ever runs) against the post-holdout forward period, exactly once. Performs NO training
+    and NO model selection -- it only loads the frozen champion's stored artifact and scores
+    it. Every call is logged to forward_paper_access_log. Do not run this repeatedly as part
+    of model development; it is a one-time formal evaluation, not a tuning loop."""
+    configure_logging()
+    import real_pipeline as rp
+    from backtesting.forward_paper import (
+        evaluate_on_forward_paper,
+        load_frozen_champion_for_forward_paper,
+    )
+    from models.registry import load_model
+
+    con = get_connection(db_path)
+    symbol_list = _parse_symbols(symbols) or rp.DEFAULT_REAL_UNIVERSE
+
+    model_version = load_frozen_champion_for_forward_paper(con)
+    _, record = load_model(con, model_version)
+    feature_cols = record["feature_names"]
+
+    post_holdout_df, _market = rp.prepare_forward_paper_data_step(con, symbol_list)
+    if post_holdout_df.empty:
+        typer.echo(json.dumps(
+            {
+                "status": "NO_POST_HOLDOUT_DATA",
+                "reason": "no rows exist after the fixed holdout end date -- ingest more recent data first",
+                "model_version": model_version,
+            },
+            indent=2,
+        ))
+        raise typer.Exit(code=1)
+
+    result = evaluate_on_forward_paper(
+        con, post_holdout_df, feature_cols, model_version,
+        purpose="evaluate-forward-paper CLI: one-time forward-paper evaluation of the frozen champion",
+    )
+    typer.echo(json.dumps(
+        {
+            "frozen_model_version": model_version,
+            "forward_paper_rows": result.n_rows,
+            "forward_paper_date_range": [str(result.log_entry.forward_paper_start), str(result.log_entry.forward_paper_end)],
+            "metrics": result.metrics,
+            "access_log_id": result.log_entry.id,
+        },
+        indent=2, default=str,
+    ))
+
+
+@app.command()
 def real_demo(
     symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE (20 liquid US large caps)"),
     start: str = typer.Option(None, help="ISO start date, default 2020-01-01"),

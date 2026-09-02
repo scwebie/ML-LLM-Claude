@@ -440,6 +440,20 @@ V02_DDL_STATEMENTS: list[str] = [
         symbols VARCHAR
     );
     """,
+    # V0.3 Stage 10: forward-paper evaluation period audit log -- mirrors
+    # holdout_access_log exactly, for the post-holdout forward period.
+    """
+    CREATE TABLE IF NOT EXISTS forward_paper_access_log (
+        id VARCHAR PRIMARY KEY,
+        accessed_at TIMESTAMP NOT NULL,
+        purpose VARCHAR NOT NULL,
+        model_version VARCHAR NOT NULL,
+        forward_paper_start TIMESTAMP NOT NULL,
+        forward_paper_end TIMESTAMP NOT NULL,
+        n_rows INTEGER NOT NULL,
+        symbols VARCHAR
+    );
+    """,
 ]
 
 

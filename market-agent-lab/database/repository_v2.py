@@ -21,6 +21,7 @@ from core.schemas_v2 import (
     DataSource,
     EventProbabilityObservation,
     EventSymbolMapping,
+    ForwardPaperAccessLog,
     FundamentalFact,
     HoldoutAccessLog,
     LeakageAuditResult,
@@ -442,3 +443,21 @@ def get_holdout_access_log(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """Every recorded holdout access, oldest first -- the audit trail
     reviewed to confirm the holdout was used only for final evaluation."""
     return con.execute("SELECT * FROM holdout_access_log ORDER BY accessed_at").fetchdf()
+
+
+def insert_forward_paper_access_log(con: duckdb.DuckDBPyConnection, entry: ForwardPaperAccessLog) -> None:
+    con.execute(
+        "INSERT INTO forward_paper_access_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            entry.id, entry.accessed_at, entry.purpose, entry.model_version,
+            entry.forward_paper_start, entry.forward_paper_end, entry.n_rows, json.dumps(entry.symbols),
+        ],
+    )
+
+
+def get_forward_paper_access_log(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Every recorded forward-paper access, oldest first -- the audit
+    trail reviewed to confirm the post-holdout forward period was used
+    only for one-time evaluation of an already-frozen model, never for
+    development-side model selection."""
+    return con.execute("SELECT * FROM forward_paper_access_log ORDER BY accessed_at").fetchdf()

@@ -166,6 +166,40 @@ class RealEvaluationResult:
     sharpe_audit: dict = field(default_factory=dict)
 
 
+def prepare_forward_paper_data_step(
+    con: duckdb.DuckDBPyConnection,
+    symbols: list[str] | None = None,
+    feature_version: str = REAL_FEATURE_VERSION,
+    holdout: HoldoutConfig | None = None,
+    horizon_days: int = MAX_TARGET_HORIZON_DAYS,
+    embargo_days: int = DEFAULT_EMBARGO_DAYS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """V0.3 Stage 10: builds ONLY ``post_holdout_df`` (plus the raw market
+    prices needed for any downstream diagnostics) -- no walk-forward
+    fold generation, no training, no champion/challenger call. This is
+    intentionally the lightest possible path to the forward-paper region,
+    since ``evaluate-forward-paper`` must never perform model selection;
+    the feature columns to score with come from the already-frozen
+    champion's own registry record (``models.registry.load_model``), not
+    from anything recomputed here."""
+    symbols = symbols or DEFAULT_REAL_UNIVERSE
+    holdout = holdout or default_holdout_config()
+
+    matrix = load_feature_matrix(con, feature_version, symbols=symbols)
+    if matrix.empty:
+        raise ValueError(f"no stored feature matrix for feature_version={feature_version!r} -- run build-real-features first")
+
+    market = repo.get_market_observations(con, symbols=symbols)
+    benchmark = repo.get_market_observations(con, symbols=[REAL_BENCHMARK_SYMBOL])
+    if benchmark.empty:
+        raise ValueError(f"no benchmark ({REAL_BENCHMARK_SYMBOL}) price data -- run ingest-prices first")
+    targets = compute_excess_return_targets(market, benchmark)
+    df = prepare_training_frame(matrix, targets)
+
+    partition = split_temporal_partitions(df, holdout, horizon_days, embargo_days)
+    return partition.post_holdout_df, market
+
+
 def evaluate_real_step(
     con: duckdb.DuckDBPyConnection,
     symbols: list[str] | None = None,

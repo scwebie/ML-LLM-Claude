@@ -374,3 +374,31 @@ class HoldoutAccessLog(BaseModel):
     holdout_end: datetime
     n_rows: int
     symbols: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------
+# Forward-paper evaluation period (V0.3 Stage 10)
+# --------------------------------------------------------------------------
+
+
+class ForwardPaperAccessLog(BaseModel):
+    """One recorded access to the post-holdout FORWARD PAPER evaluation
+    period (everything after the fixed historical holdout's end date).
+
+    Mirrors HoldoutAccessLog's audit-trail role exactly, for the same
+    reason: every call to
+    ``backtesting.forward_paper.evaluate_on_forward_paper`` writes one of
+    these rows, so a reviewer can confirm the forward-paper period was
+    never touched during development-only model selection, and was only
+    ever used to evaluate an already-frozen model/specification."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=_new_id)
+    accessed_at: datetime
+    purpose: str
+    model_version: str
+    forward_paper_start: datetime
+    forward_paper_end: datetime
+    n_rows: int
+    symbols: list[str] = Field(default_factory=list)

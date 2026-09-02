@@ -194,3 +194,40 @@ def test_evaluate_real_step_never_crosses_holdout_when_data_extends_far_past_it(
     assert len(evaluation.fold_results) >= 1
     for fold_result in evaluation.fold_results:
         assert fold_result.fold.validation_end < holdout.start_date
+
+
+def test_prepare_forward_paper_data_step_and_evaluate_end_to_end(con):
+    """V0.3 Stage 10 end-to-end: development-only selection freezes a
+    champion (evaluate_real_step, exactly as production does), then the
+    LIGHTWEIGHT forward-paper data step (no training, no fold generation)
+    builds post_holdout_df, and evaluate_on_forward_paper scores the
+    already-frozen model against it exactly once."""
+    from backtesting.forward_paper import (
+        evaluate_on_forward_paper,
+        load_frozen_champion_for_forward_paper,
+    )
+    from models.registry import load_model, promote_to_champion
+
+    _seed_market_data(con)
+    rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
+
+    calendar = pd.bdate_range("2020-01-02", periods=1400)
+    holdout = HoldoutConfig(start_date=calendar[1000], end_date=calendar[1100])
+
+    evaluation = rp.evaluate_real_step(con, SYMBOLS, holdout=holdout, initial_train_fraction=0.6, validation_fraction=0.15)
+    assert evaluation.champion_model_version is not None
+    if not evaluation.promoted:
+        promote_to_champion(con, evaluation.champion_model_version)  # force a frozen champion to exist for this test
+
+    post_holdout_df, _market = rp.prepare_forward_paper_data_step(con, SYMBOLS, holdout=holdout)
+    assert not post_holdout_df.empty
+    assert (post_holdout_df["timestamp"] > holdout.end_date).all()
+
+    model_version = load_frozen_champion_for_forward_paper(con)
+    _, record = load_model(con, model_version)
+    result = evaluate_on_forward_paper(con, post_holdout_df, record["feature_names"], model_version, "V0.3 Stage 10 test")
+
+    assert result.n_rows == len(post_holdout_df)
+    assert result.model_version == model_version
+    log_count = con.execute("SELECT COUNT(*) FROM forward_paper_access_log").fetchone()[0]
+    assert log_count == 1
