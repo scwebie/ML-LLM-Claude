@@ -260,8 +260,16 @@ def permutation_test_ic(
     """Null hypothesis: the model's predictions carry no real relationship
     to the realised target. Shuffles ``y_true`` (breaking any real
     relationship while preserving both marginal distributions) and
-    recomputes the rank IC ``n_permutations`` times; the p-value is the
-    fraction of shuffles whose |IC| meets or exceeds the observed |IC|."""
+    recomputes the rank IC ``n_permutations`` times.
+
+    The p-value uses the standard finite-permutation correction
+    ``p = (k + 1) / (N + 1)`` (Davison & Hinkley 1997; North, Curtis &
+    Sham 2002), where ``k`` is the number of permuted statistics at least
+    as extreme as the observed one and ``N`` is the permutation count --
+    NEVER the naive ``k / N``, which can report a literal p=0.0 with a
+    finite number of permutations even though the true p-value is only
+    known to be less than ``1 / (N + 1)``. A permutation test can never
+    honestly claim p=0 from a finite sample of the null distribution."""
     y_true_arr = np.asarray(y_true, dtype=float)
     y_pred_arr = np.asarray(y_pred, dtype=float)
     mask = ~(np.isnan(y_true_arr) | np.isnan(y_pred_arr))
@@ -275,7 +283,8 @@ def permutation_test_ic(
     for i in range(n_permutations):
         shuffled = rng.permutation(y_true_arr)
         null_ics[i] = information_coefficient(pd.Series(shuffled), pd.Series(y_pred_arr))
-    p_value = float(np.mean(np.abs(null_ics) >= abs(observed)))
+    k = int(np.sum(np.abs(null_ics) >= abs(observed)))
+    p_value = float((k + 1) / (n_permutations + 1))
     return {
         "observed_ic": observed, "p_value": p_value, "n_permutations": n_permutations,
         "null_mean": float(np.mean(null_ics)), "null_std": float(np.std(null_ics)),
