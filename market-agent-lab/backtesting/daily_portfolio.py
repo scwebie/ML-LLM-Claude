@@ -47,6 +47,7 @@ import numpy as np
 import pandas as pd
 
 from backtesting.metrics import TRADING_DAYS_PER_YEAR, max_drawdown, sharpe_ratio
+from backtesting.purged_walk_forward import _trading_day_offset
 
 
 def build_daily_rebalanced_portfolio_returns(
@@ -55,6 +56,8 @@ def build_daily_rebalanced_portfolio_returns(
     pred_col: str,
     top_frac: float = 0.2,
     price_col: str = "adjusted_close",
+    extra_delay_days: int = 0,
+    rebalance_threshold: float | None = None,
 ) -> pd.DataFrame:
     """One row per TRADING DAY (never per symbol, never per prediction
     date's multi-day-forward target). ``predictions_df`` needs
@@ -66,7 +69,24 @@ def build_daily_rebalanced_portfolio_returns(
     Columns returned: ``timestamp``, ``gross_return`` (the day's realised
     long/short book return), ``turnover`` (0.0 on every day the book
     carries over unchanged, the fraction of the book that changed on a
-    day a new rebalance takes effect), ``n_long``, ``n_short``."""
+    day a new rebalance takes effect), ``n_long``, ``n_short``.
+
+    ``extra_delay_days`` (V0.3 Stage 12): additional trading days of
+    execution delay ON TOP OF the built-in one-day no-look-ahead gap
+    (a signal observed on date D always takes effect no earlier than
+    D+1; ``extra_delay_days=1`` pushes that to D+2, simulating a slower
+    fill). ``price_col`` doubles as the execution-price stress lever --
+    pass ``"open"`` for a "trade at next open" assumption instead of the
+    default close-to-close.
+
+    ``rebalance_threshold`` (V0.3 Stage 12): if set, a new candidate book
+    is only ADOPTED when it differs from the currently held book by at
+    least this fraction of book_size (a two-sided book-replacement
+    fraction, same convention as ``turnover`` below); otherwise the prior
+    book is held through that rebalance date. This is what "threshold-
+    based rebalance" means here -- trade only when the signal has moved
+    enough to be worth the (unmodelled, see cost_bps in
+    :func:`sharpe_audit_report`) transaction cost."""
     if predictions_df.empty or market_df.empty:
         return pd.DataFrame(columns=["timestamp", "gross_return", "turnover", "n_long", "n_short"])
 
@@ -85,6 +105,32 @@ def build_daily_rebalanced_portfolio_returns(
 
     if not rebalance_books:
         return pd.DataFrame(columns=["timestamp", "gross_return", "turnover", "n_long", "n_short"])
+
+    if rebalance_threshold is not None:
+        filtered: dict[pd.Timestamp, tuple[frozenset[str], frozenset[str]]] = {}
+        held_long: frozenset[str] = frozenset()
+        held_short: frozenset[str] = frozenset()
+        for date in sorted(rebalance_books):
+            cand_long, cand_short = rebalance_books[date]
+            if not held_long and not held_short:
+                filtered[date] = (cand_long, cand_short)
+                held_long, held_short = cand_long, cand_short
+                continue
+            book_size = max(1, len(held_long) + len(held_short))
+            change_frac = len((cand_long ^ held_long) | (cand_short ^ held_short)) / book_size
+            if change_frac >= rebalance_threshold:
+                filtered[date] = (cand_long, cand_short)
+                held_long, held_short = cand_long, cand_short
+        rebalance_books = filtered
+        if not rebalance_books:
+            return pd.DataFrame(columns=["timestamp", "gross_return", "turnover", "n_long", "n_short"])
+
+    if extra_delay_days:
+        shifted: dict[pd.Timestamp, tuple[frozenset[str], frozenset[str]]] = {}
+        for date in sorted(rebalance_books):
+            shifted_date = _trading_day_offset(date, daily_ret_wide.index, extra_delay_days)
+            shifted[shifted_date] = rebalance_books[date]
+        rebalance_books = shifted
 
     rebalance_dates = sorted(rebalance_books)
     calendar = [d for d in daily_ret_wide.index if d > rebalance_dates[0]]  # returns only exist strictly after data starts

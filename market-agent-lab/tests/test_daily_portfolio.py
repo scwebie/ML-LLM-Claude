@@ -187,3 +187,71 @@ def test_overlapping_target_sharpe_is_inflated_relative_to_genuine_daily_sharpe(
     # The overlapping-window calculation must be substantially larger --
     # not just marginally -- than the corrected one.
     assert new_sharpe < old_sharpe * 0.5
+
+
+# --- V0.3 Stage 12: extra_delay_days and rebalance_threshold -------------------------------------
+
+
+def test_extra_delay_days_pushes_book_activation_further_out():
+    symbols = ["A", "B", "C", "D"]
+    dates = pd.bdate_range("2021-01-04", periods=15)
+    prices = pd.DataFrame(100.0, index=dates, columns=symbols)
+    prices.loc[dates[6]:, "A"] = 150.0  # A jumps on day index 6
+
+    market_df = _market_df(prices)
+    predictions_df = pd.DataFrame(
+        [{"symbol": s, "timestamp": dates[4], "pred": 1.0 if s == "A" else 0.0} for s in symbols]
+    )
+
+    no_extra_delay = build_daily_rebalanced_portfolio_returns(predictions_df, market_df, "pred", top_frac=0.25)
+    with_extra_delay = build_daily_rebalanced_portfolio_returns(
+        predictions_df, market_df, "pred", top_frac=0.25, extra_delay_days=2
+    )
+
+    # No extra delay: book active by day 5 (signal on day 4 -> effect day
+    # 5), captures A's jump on day 6.
+    day6_no_delay = no_extra_delay[no_extra_delay["timestamp"] == dates[6]]
+    assert not day6_no_delay.empty
+    assert day6_no_delay["gross_return"].iloc[0] > 0.1
+
+    # +2 extra delay days: book not active until day 7 -- day 6's jump
+    # must NOT be captured (return should be ~0, since the book held
+    # before day 7 is empty/inactive).
+    day6_with_delay = with_extra_delay[with_extra_delay["timestamp"] == dates[6]]
+    assert day6_with_delay.empty or abs(day6_with_delay["gross_return"].iloc[0]) < 1e-9
+
+
+def test_rebalance_threshold_holds_the_book_through_a_small_change():
+    symbols, dates, _, prices = _synthetic_universe(n_symbols=10, n_days=60, seed=8)
+    market_df = _market_df(prices)
+    rng = np.random.default_rng(9)
+
+    # Two rebalance signals close together: the second candidate book
+    # differs from the first by only ONE symbol out of a 6-name book
+    # (well under a 50% threshold), so a threshold-based rebalance should
+    # hold the ORIGINAL book through the second signal date.
+    first_signal = {s: rng.normal() for s in symbols}
+    ranked = sorted(first_signal, key=first_signal.get, reverse=True)
+    second_signal = dict(first_signal)
+    # Swap just the boundary long/short members slightly -- one name changes rank enough to flip.
+    second_signal[ranked[0]], second_signal[ranked[-1]] = second_signal[ranked[-1]], second_signal[ranked[0]]
+
+    predictions_df = pd.DataFrame(
+        [{"symbol": s, "timestamp": dates[5], "pred": v} for s, v in first_signal.items()]
+        + [{"symbol": s, "timestamp": dates[10], "pred": v} for s, v in second_signal.items()]
+    )
+
+    unthresholded = build_daily_rebalanced_portfolio_returns(predictions_df, market_df, "pred", top_frac=0.3)
+    thresholded = build_daily_rebalanced_portfolio_returns(
+        predictions_df, market_df, "pred", top_frac=0.3, rebalance_threshold=0.9
+    )
+
+    # With a high threshold, the second signal's tiny change must be
+    # rejected -- turnover on/after the second signal date must stay 0
+    # (holding the original book), unlike the unthresholded version which
+    # shows nonzero turnover when the book actually changes.
+    thresholded_turnover_at_second_signal = thresholded[thresholded["timestamp"] > dates[10]]["turnover"]
+    assert (thresholded_turnover_at_second_signal == 0.0).all()
+
+    unthresholded_turnover_at_second_signal = unthresholded[unthresholded["timestamp"] == dates[11]]["turnover"]
+    assert (unthresholded_turnover_at_second_signal > 0.0).any()
