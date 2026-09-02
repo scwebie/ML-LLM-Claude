@@ -396,6 +396,26 @@ def evaluate_forward_paper(
 
 
 @app.command()
+def verify_reproducibility(
+    model_version: str = typer.Argument(..., help="model_version to verify, e.g. lgbm_v0007"),
+    db_path: str = typer.Option(None, help="Override the DuckDB file path"),
+) -> None:
+    """V0.3 Stage 13: re-hashes ``model_version``'s persisted artifact files
+    on disk right now and compares against the ``artifact_hash`` recorded
+    in the registry at training time. Performs NO training and NO
+    re-evaluation -- it only verifies the artifact on disk still matches
+    what the registry says was produced."""
+    configure_logging()
+    from models.registry import verify_artifact_reproducibility
+
+    con = get_connection(db_path)
+    result = verify_artifact_reproducibility(con, model_version)
+    typer.echo(json.dumps(result, indent=2, default=str))
+    if not result["matches"]:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def real_demo(
     symbols: str = typer.Option(None, help="Comma-separated symbols; default = DEFAULT_REAL_UNIVERSE (20 liquid US large caps)"),
     start: str = typer.Option(None, help="ISO start date, default 2020-01-01"),

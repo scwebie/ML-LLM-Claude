@@ -174,7 +174,12 @@ DDL_STATEMENTS: list[str] = [
         test_period_start TIMESTAMP,
         test_period_end TIMESTAMP,
         metrics_json VARCHAR NOT NULL,
-        artifact_path VARCHAR NOT NULL
+        artifact_path VARCHAR NOT NULL,
+        git_commit VARCHAR,
+        target_definition_hash VARCHAR,
+        random_seed INTEGER,
+        data_fingerprint VARCHAR,
+        artifact_hash VARCHAR
     );
     """,
     """

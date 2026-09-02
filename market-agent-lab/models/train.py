@@ -33,6 +33,8 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from models import reproducibility
+
 NON_FEATURE_COLUMNS = {
     "symbol", "timestamp",
     "excess_return_5d", "excess_return_20d", "positive_5d", "positive_20d",
@@ -50,6 +52,14 @@ DEFAULT_HYPERPARAMETERS: dict[str, dict] = {
         "min_data_in_leaf": 30,
         "verbosity": -1,
         "seed": 42,
+        # V0.3 Stage 13: LightGBM's default multi-threaded histogram build
+        # is NOT bit-for-bit reproducible run-to-run even with a fixed
+        # seed. ``deterministic`` (paired with a fixed row/col-wise mode)
+        # trades a little training speed for a genuinely reproducible
+        # artifact given the same data + seed, which the model registry's
+        # reproducibility guarantee depends on.
+        "deterministic": True,
+        "force_row_wise": True,
     },
     "classification": {
         "objective": "binary",
@@ -62,6 +72,8 @@ DEFAULT_HYPERPARAMETERS: dict[str, dict] = {
         "min_data_in_leaf": 30,
         "verbosity": -1,
         "seed": 42,
+        "deterministic": True,
+        "force_row_wise": True,
     },
 }
 
@@ -111,6 +123,10 @@ class TrainedModels:
     boosters: dict[str, lgb.Booster] = field(default_factory=dict)
     feature_names: list[str] = field(default_factory=list)
     hyperparameters: dict[str, dict] = field(default_factory=dict)
+    # V0.3 Stage 13 reproducibility provenance -- see models/reproducibility.py.
+    data_fingerprint: str | None = None
+    target_definition_hash: str | None = None
+    random_seed: int | None = None
 
 
 def train_single_target(
@@ -157,4 +173,12 @@ def train_all_targets(
         boosters[target_col] = train_single_target(
             train_df, val_df, feature_cols, target_col, hyperparameters.get(kind)
         )
-    return TrainedModels(boosters=boosters, feature_names=feature_cols, hyperparameters=hyperparameters)
+    data_fingerprint = reproducibility.compute_data_fingerprint(
+        train_df, val_df, feature_cols, list(TARGET_KIND.keys())
+    )
+    target_definition_hash = reproducibility.hash_source(compute_excess_return_targets)
+    random_seed = reproducibility.extract_seed(hyperparameters)
+    return TrainedModels(
+        boosters=boosters, feature_names=feature_cols, hyperparameters=hyperparameters,
+        data_fingerprint=data_fingerprint, target_definition_hash=target_definition_hash, random_seed=random_seed,
+    )

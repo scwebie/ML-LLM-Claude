@@ -413,7 +413,7 @@ def upsert_model_registry(con: duckdb.DuckDBPyConnection, record: dict) -> None:
     con.execute(
         """
         INSERT OR REPLACE INTO model_registry VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["model_version"],
@@ -430,6 +430,11 @@ def upsert_model_registry(con: duckdb.DuckDBPyConnection, record: dict) -> None:
             record.get("test_period_end"),
             json.dumps(record["metrics"]),
             record["artifact_path"],
+            record.get("git_commit"),
+            record.get("target_definition_hash"),
+            record.get("random_seed"),
+            record.get("data_fingerprint"),
+            record.get("artifact_hash"),
         ],
     )
 

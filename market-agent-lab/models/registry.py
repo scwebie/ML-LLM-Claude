@@ -22,6 +22,7 @@ import lightgbm as lgb
 
 from core.config import settings
 from database import repository as repo
+from models import reproducibility
 from models.train import TrainedModels
 
 ROLE_CHAMPION = "CHAMPION"
@@ -68,6 +69,13 @@ def register_model(
     }
     (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
+    # V0.3 Stage 13 reproducibility provenance. git_commit and artifact_hash
+    # are properties of THIS run/artifact and can only be computed here
+    # (after the artifact files are on disk); data_fingerprint/
+    # target_definition_hash/random_seed were already computed once, at
+    # training time, in models.train.train_all_targets, and simply flow
+    # through on ``trained`` rather than being re-derived from data this
+    # function never sees.
     record = {
         "model_version": model_version,
         "role": role,
@@ -79,6 +87,11 @@ def register_model(
         "training_period_end": periods.training_end,
         "validation_period_start": periods.validation_start,
         "validation_period_end": periods.validation_end,
+        "git_commit": reproducibility.get_git_commit(),
+        "target_definition_hash": trained.target_definition_hash,
+        "random_seed": trained.random_seed,
+        "data_fingerprint": trained.data_fingerprint,
+        "artifact_hash": reproducibility.compute_artifact_hash(artifact_dir),
         "test_period_start": periods.test_start,
         "test_period_end": periods.test_end,
         "metrics": metrics,
@@ -105,6 +118,29 @@ def load_model(con: duckdb.DuckDBPyConnection, model_version: str) -> tuple[dict
     record["feature_names"] = feature_names
     record["metrics"] = json.loads(record["metrics_json"])
     return boosters, record
+
+
+def verify_artifact_reproducibility(con: duckdb.DuckDBPyConnection, model_version: str) -> dict:
+    """V0.3 Stage 13: re-hashes ``model_version``'s artifact files on disk
+    RIGHT NOW and compares against the ``artifact_hash`` recorded at
+    registration time. A mismatch means the persisted artifact no longer
+    matches what the registry says was trained -- e.g. a file was
+    overwritten, corrupted, or edited outside the registry. Does not
+    retrain anything."""
+    df = repo.get_model_registry(con)
+    row = df[df["model_version"] == model_version]
+    if row.empty:
+        raise KeyError(f"model_version={model_version} not found in registry")
+    record = row.iloc[0].to_dict()
+    artifact_dir = Path(record["artifact_path"])
+    recorded_hash = record.get("artifact_hash")
+    current_hash = reproducibility.compute_artifact_hash(artifact_dir)
+    return {
+        "model_version": model_version,
+        "recorded_artifact_hash": recorded_hash,
+        "current_artifact_hash": current_hash,
+        "matches": recorded_hash == current_hash,
+    }
 
 
 def get_champion(con: duckdb.DuckDBPyConnection) -> dict | None:
