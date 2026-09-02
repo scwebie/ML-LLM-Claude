@@ -322,6 +322,8 @@ def evaluate_real(
                 for r in evaluation.fold_results
             ],
             "fold_metrics_summary": evaluation.fold_metrics_summary,
+            "incumbent_champion_version_before_evaluation": evaluation.incumbent_champion_version_before_evaluation,
+            "challenger_model_version": evaluation.champion_model_version,
             "champion_model_version": evaluation.champion_model_version,
             "promoted": evaluation.promoted,
             "promotion_rationale": evaluation.promotion_rationale,
@@ -390,6 +392,8 @@ def real_demo(
                 }
                 for r in evaluation.fold_results
             ],
+            "incumbent_champion_version_before_evaluation": evaluation.incumbent_champion_version_before_evaluation,
+            "challenger_model_version": evaluation.champion_model_version,
             "champion_model_version": evaluation.champion_model_version,
             "promoted": evaluation.promoted,
             "promotion_rationale": evaluation.promotion_rationale,

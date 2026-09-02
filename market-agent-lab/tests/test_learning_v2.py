@@ -6,10 +6,13 @@ None of this touches learning/champion_challenger.py or learning/drift.py
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from database import repository as repo
 from database.db import fresh_connection
 from database.schema import init_schema
 from learning.champion_challenger import PromotionCriteria
@@ -247,52 +250,129 @@ def _synthetic_feature_target_frame(n_days: int = 700, seed: int = 5) -> pd.Data
     )
 
 
-def test_run_promotion_cycle_v2_rejects_weak_initial_model_and_logs_it(con):
-    df = _synthetic_feature_target_frame()
-    feature_cols = ["f1", "f2"]
+def _train_and_register(con, df, feature_cols, validation_start, validation_end, metrics, role="CHALLENGER"):
     trained = train_all_targets(df.iloc[:500], df.iloc[500:600], feature_cols)
     periods = ModelPeriods(
-        training_start=df["timestamp"].iloc[0], training_end=df["timestamp"].iloc[499],
-        validation_start=df["timestamp"].iloc[500], validation_end=df["timestamp"].iloc[599],
+        training_start=df["timestamp"].iloc[0], training_end=validation_start - pd.Timedelta(days=1),
+        validation_start=validation_start, validation_end=validation_end,
     )
-    # Purely random synthetic data -> genuinely no real skill; IC should be near zero.
+    version = register_model(con, trained, "fv1", periods, metrics, role=role)
+    return version, periods
+
+
+# V0.3 Stage 1, item 7: "no incumbent" ------------------------------------------------------------
+
+
+def test_run_promotion_cycle_v2_no_incumbent_uses_initial_qualification_path(con):
+    df = _synthetic_feature_target_frame()
+    feature_cols = ["f1", "f2"]
+    metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
+    model_version, periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], metrics
+    )
+
+    assert repo.get_champion(con) is None  # confirms this really is the no-incumbent case
+    strong_predictions = _strong_predictions_df()
+    promoted, rationale = run_promotion_cycle_v2(
+        con, model_version, metrics, strong_predictions, champion_record=None,
+        challenger_validation_end=periods.validation_end,
+    )
+    assert promoted is True
+    assert "initial-qualification criterion" in rationale
+
+    champion = repo.get_champion(con)
+    assert champion is not None
+    assert champion["model_version"] == model_version
+
+
+def test_run_promotion_cycle_v2_no_incumbent_rejects_weak_challenger(con):
+    df = _synthetic_feature_target_frame()
+    feature_cols = ["f1", "f2"]
     metrics = {"excess_return_20d": {"information_coefficient": 0.001, "sharpe_ratio": 0.01}}
-    model_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
+    model_version, periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], metrics
+    )
 
     weak_predictions = _weak_predictions_df()
-    promoted, rationale = run_promotion_cycle_v2(con, model_version, metrics, weak_predictions)
+    promoted, rationale = run_promotion_cycle_v2(
+        con, model_version, metrics, weak_predictions, champion_record=None,
+        challenger_validation_end=periods.validation_end,
+    )
     assert promoted is False
+    assert "failed the initial-qualification bar" in rationale
 
     log = con.execute("SELECT * FROM promotion_log").fetchdf()
     assert len(log) == 1
     assert log.iloc[0]["decision"] == "REJECTED"
     assert log.iloc[0]["challenger_version"] == model_version
-
-    from database import repository as repo
-
     assert repo.get_champion(con) is None  # rejection must not install a champion
 
 
-def test_run_promotion_cycle_v2_promotes_strong_initial_model_and_becomes_champion(con):
+# V0.3 Stage 1, item 7: genuine challenger beats / fails incumbent comparison ----------------------
+
+
+def test_run_promotion_cycle_v2_genuine_challenger_beats_incumbent(con):
+    """A challenger with a LATER validation window and strictly better
+    metrics must be promoted over a real (different-version) incumbent."""
     df = _synthetic_feature_target_frame()
     feature_cols = ["f1", "f2"]
-    trained = train_all_targets(df.iloc[:500], df.iloc[500:600], feature_cols)
-    periods = ModelPeriods(
-        training_start=df["timestamp"].iloc[0], training_end=df["timestamp"].iloc[499],
-        validation_start=df["timestamp"].iloc[500], validation_end=df["timestamp"].iloc[599],
+    champ_metrics = {"excess_return_20d": {"information_coefficient": 0.05, "sharpe_ratio": 0.5}, "positive_20d": {"brier_score": 0.24}}
+    champ_version, champ_periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], champ_metrics
     )
-    metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
-    model_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
-
-    strong_predictions = _strong_predictions_df()
-    promoted, rationale = run_promotion_cycle_v2(con, model_version, metrics, strong_predictions)
+    promoted, _ = run_promotion_cycle_v2(
+        con, champ_version, champ_metrics, _strong_predictions_df(seed=10), champion_record=None,
+        challenger_validation_end=champ_periods.validation_end,
+    )
     assert promoted is True
 
-    from database import repository as repo
+    incumbent = repo.get_champion(con)
+    assert incumbent["model_version"] == champ_version
 
-    champion = repo.get_champion(con)
-    assert champion is not None
-    assert champion["model_version"] == model_version
+    chal_metrics = {"excess_return_20d": {"information_coefficient": 0.20, "sharpe_ratio": 1.5}, "positive_20d": {"brier_score": 0.20}}
+    chal_version, chal_periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[560], df["timestamp"].iloc[659], chal_metrics
+    )
+    assert chal_periods.validation_end > champ_periods.validation_end  # genuinely newer data
+    promoted, rationale = run_promotion_cycle_v2(
+        con, chal_version, chal_metrics, _strong_predictions_df(), champion_record=incumbent,
+        challenger_validation_end=chal_periods.validation_end, target_col="excess_return_20d",
+    )
+    assert promoted is True
+    assert "IC 0.2000" in rationale
+    assert repo.get_champion(con)["model_version"] == chal_version
+
+
+def test_run_promotion_cycle_v2_challenger_fails_incumbent_comparison(con):
+    """A challenger with a later validation window but WORSE metrics must
+    be rejected, and the incumbent must remain champion."""
+    df = _synthetic_feature_target_frame()
+    feature_cols = ["f1", "f2"]
+    champ_metrics = {"excess_return_20d": {"information_coefficient": 0.30, "sharpe_ratio": 2.0}, "positive_20d": {"brier_score": 0.20}}
+    champ_version, champ_periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], champ_metrics
+    )
+    promoted, _ = run_promotion_cycle_v2(
+        con, champ_version, champ_metrics, _strong_predictions_df(), champion_record=None,
+        challenger_validation_end=champ_periods.validation_end,
+    )
+    assert promoted is True
+    incumbent = repo.get_champion(con)
+
+    chal_metrics = {"excess_return_20d": {"information_coefficient": 0.02, "sharpe_ratio": 0.1}, "positive_20d": {"brier_score": 0.20}}
+    chal_version, chal_periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[560], df["timestamp"].iloc[659], chal_metrics
+    )
+    promoted, rationale = run_promotion_cycle_v2(
+        con, chal_version, chal_metrics, _weak_predictions_df(), champion_record=incumbent,
+        challenger_validation_end=chal_periods.validation_end, target_col="excess_return_20d",
+    )
+    assert promoted is False
+    assert "champion" in rationale
+    assert repo.get_champion(con)["model_version"] == champ_version  # incumbent unchanged
+
+
+# V0.3 Stage 1, item 7: same model version comparison raises ---------------------------------------
 
 
 def test_run_promotion_cycle_v2_asserts_challenger_never_equals_existing_champion(con):
@@ -306,44 +386,98 @@ def test_run_promotion_cycle_v2_asserts_challenger_never_equals_existing_champio
     promotion decision."""
     df = _synthetic_feature_target_frame()
     feature_cols = ["f1", "f2"]
-    trained = train_all_targets(df.iloc[:500], df.iloc[500:600], feature_cols)
-    periods = ModelPeriods(
-        training_start=df["timestamp"].iloc[0], training_end=df["timestamp"].iloc[499],
-        validation_start=df["timestamp"].iloc[500], validation_end=df["timestamp"].iloc[599],
-    )
     metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
-    model_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
+    model_version, periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], metrics
+    )
 
     strong_predictions = _strong_predictions_df()
-    promoted, _ = run_promotion_cycle_v2(con, model_version, metrics, strong_predictions)
+    promoted, _ = run_promotion_cycle_v2(
+        con, model_version, metrics, strong_predictions, champion_record=None,
+        challenger_validation_end=periods.validation_end,
+    )
     assert promoted is True  # model_version is now CHAMPION
+    incumbent = repo.get_champion(con)
 
-    # Re-run the promotion cycle but hand it the SAME version string as
-    # the challenger under evaluation -- exactly what a colliding
-    # model_version would produce.
+    # Hand it the SAME version string as both the challenger under
+    # evaluation and the (correctly, separately loaded) incumbent -- what
+    # a colliding model_version would produce.
     with pytest.raises(AssertionError, match="never be legitimately compared against itself"):
-        run_promotion_cycle_v2(con, model_version, metrics, strong_predictions)
+        run_promotion_cycle_v2(
+            con, model_version, metrics, strong_predictions, champion_record=incumbent,
+            challenger_validation_end=periods.validation_end,
+        )
 
 
-def test_run_promotion_cycle_v2_allows_a_genuinely_different_challenger_version(con):
-    """Sanity check alongside the self-comparison guard above: a
-    challenger with a version that differs from the incumbent champion's
-    must still be compared normally, not blocked by the new assertion."""
+# V0.3 Stage 1, item 7: registry persistence across repeated runs ----------------------------------
+
+
+def test_model_registry_persists_every_run_across_repeated_evaluate_calls(con):
+    """Every register_model() call must persist as its own durable,
+    independently retrievable row -- repeated runs must accumulate
+    history, never overwrite or lose a prior model's record."""
     df = _synthetic_feature_target_frame()
     feature_cols = ["f1", "f2"]
-    trained = train_all_targets(df.iloc[:500], df.iloc[500:600], feature_cols)
-    periods = ModelPeriods(
-        training_start=df["timestamp"].iloc[0], training_end=df["timestamp"].iloc[499],
-        validation_start=df["timestamp"].iloc[500], validation_end=df["timestamp"].iloc[599],
-    )
     metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
-    first_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
-    strong_predictions = _strong_predictions_df()
-    promoted, _ = run_promotion_cycle_v2(con, first_version, metrics, strong_predictions)
-    assert promoted is True
 
-    second_version = register_model(con, trained, "fv1", periods, metrics, role="CHALLENGER")
-    assert second_version != first_version
-    promoted, rationale = run_promotion_cycle_v2(con, second_version, metrics, strong_predictions)
-    assert promoted is True  # identical metrics still legitimately pass every criterion
-    assert "IC 0.6000" in rationale
+    versions = []
+    for i in range(4):
+        version, _ = _train_and_register(
+            con, df, feature_cols, df["timestamp"].iloc[500 + i], df["timestamp"].iloc[599 + i], metrics
+        )
+        versions.append(version)
+
+    assert len(versions) == len(set(versions))  # every version is unique
+    registry = repo.get_model_registry(con)
+    assert len(registry) == 4
+    assert set(registry["model_version"]) == set(versions)
+    # Each row's own metrics/periods must be independently readable back,
+    # not aliased to another run's record.
+    for version in versions:
+        row = registry[registry["model_version"] == version].iloc[0]
+        assert json.loads(row["metrics_json"])["excess_return_20d"]["information_coefficient"] == pytest.approx(0.6)
+
+
+# V0.3 Stage 1, item 7: repeated evaluate-real cannot self-promote ---------------------------------
+
+
+def test_run_promotion_cycle_v2_rejects_unchanged_validation_window_as_vacuous(con):
+    """The core V0.3 fix: a "new" challenger trained on data whose
+    validation window does NOT extend past the incumbent's -- exactly
+    what re-running evaluate-real against unchanged development data
+    produces, since LightGBM training is deterministic -- must be
+    rejected before any metric comparison, never silently promoted just
+    because its (identical) metrics trivially "pass"."""
+    df = _synthetic_feature_target_frame()
+    feature_cols = ["f1", "f2"]
+    metrics = {"excess_return_20d": {"information_coefficient": 0.6, "sharpe_ratio": 1.2}}
+    champ_version, champ_periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], metrics
+    )
+    promoted, _ = run_promotion_cycle_v2(
+        con, champ_version, metrics, _strong_predictions_df(), champion_record=None,
+        challenger_validation_end=champ_periods.validation_end,
+    )
+    assert promoted is True
+    incumbent = repo.get_champion(con)
+
+    # A second "challenger" registered from the SAME unchanged development
+    # data -- same validation window as the incumbent it's being compared
+    # against (deterministic retraining even reproduces identical metrics,
+    # but the rejection here must not even need to look at them).
+    chal_version, chal_periods = _train_and_register(
+        con, df, feature_cols, df["timestamp"].iloc[500], df["timestamp"].iloc[599], metrics
+    )
+    assert chal_periods.validation_end == champ_periods.validation_end
+    promoted, rationale = run_promotion_cycle_v2(
+        con, chal_version, metrics, _strong_predictions_df(), champion_record=incumbent,
+        challenger_validation_end=chal_periods.validation_end,
+    )
+    assert promoted is False
+    assert "no new development data" in rationale
+    assert repo.get_champion(con)["model_version"] == champ_version  # incumbent unchanged
+
+    log = repo.get_promotion_log(con)
+    assert log.iloc[-1]["decision"] == "REJECTED"
+    assert log.iloc[-1]["challenger_version"] == chal_version
+    assert log.iloc[-1]["champion_version"] == champ_version

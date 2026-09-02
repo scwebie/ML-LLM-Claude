@@ -95,37 +95,41 @@ def test_evaluate_real_step_never_touches_holdout_and_produces_a_promotion_decis
     assert log.iloc[0]["challenger_version"] == evaluation.champion_model_version
 
 
-def test_repeated_evaluate_real_promotion_rationale_ic_matches_this_runs_own_fold_ic(con):
-    """End-to-end regression test for a reported production bug: after a
-    champion already exists, re-running evaluate_real_step registers a
-    genuinely new (differently-versioned) challenger and compares it
-    against the incumbent champion. The promotion rationale's IC must be
-    this run's own PRIMARY_TARGET (excess_return_20d) last-fold IC -- the
-    same number reported in fold_metrics_summary -- never a mismatched
-    excess_return_5d number silently substituted by the promotion gate."""
+def test_repeated_evaluate_real_cannot_self_promote_against_unchanged_data(con):
+    """End-to-end regression test for a reported production bug: running
+    evaluate_real_step twice against the SAME unchanged database (no new
+    ingestion between calls) previously registered a genuinely new
+    (differently-versioned) challenger whose metrics came out numerically
+    IDENTICAL to the incumbent's -- because LightGBM training is
+    deterministic and both runs see the exact same development data and
+    folds -- and silently "promoted" it, logging a fresh but completely
+    uninformative PROMOTED decision every single re-run.
+
+    V0.3 Stage 1 closes this: a challenger whose validation window does
+    not extend past the incumbent's is now rejected outright, before any
+    metric is even compared."""
     _seed_market_data(con)
     rp.build_real_features_step(con, SYMBOLS, "test_universe", pd.Timestamp("2020-01-02"))
 
     first = rp.evaluate_real_step(con, SYMBOLS, initial_train_fraction=0.6, validation_fraction=0.15)
     assert first.champion_model_version is not None
     assert first.promoted is True  # this seeded fixture's first challenger clears initial qualification
+    first_champion = repo.get_champion(con)["model_version"]
 
     second = rp.evaluate_real_step(con, SYMBOLS, initial_train_fraction=0.6, validation_fraction=0.15)
-    # A champion now exists, so this run took the existing-champion
-    # comparison branch, not the initial-qualification branch.
-    assert "no existing champion" not in second.promotion_rationale
-    last_fold_ic_20d = second.fold_metrics_summary["per_fold_information_coefficient"][-1]
-    assert f"IC {last_fold_ic_20d:.4f}" in second.promotion_rationale
+    # Same development data in, same purged folds out -- the second run's
+    # challenger has the exact same validation window as the incumbent.
+    assert second.champion_model_version != first.champion_model_version  # genuinely new version, never a literal collision
+    assert second.promoted is False
+    assert "no new development data" in second.promotion_rationale
 
-    # The two runs registered genuinely different model_versions (never a
-    # literal self-comparison) even though -- because nothing about the
-    # underlying data changed between calls and LightGBM training is
-    # deterministic (fixed seed) -- their metrics come out numerically
-    # identical. That is a legitimate, if uninformative, comparison: the
-    # self-comparison guard (see test_learning_v2.py) only fires on an
-    # actual version collision, not on this.
+    # The incumbent must be completely unchanged by the vacuous re-run.
+    assert repo.get_champion(con)["model_version"] == first_champion
+
     log = repo.get_promotion_log(con)
-    assert log.iloc[-1]["challenger_version"] != log.iloc[-1]["champion_version"]
+    assert log.iloc[-1]["decision"] == "REJECTED"
+    assert log.iloc[-1]["challenger_version"] == second.champion_model_version
+    assert log.iloc[-1]["champion_version"] == first_champion
 
 
 def test_run_real_demo_with_skip_ingestion_completes_without_network(con):

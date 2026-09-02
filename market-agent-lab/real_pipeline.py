@@ -160,6 +160,7 @@ class RealEvaluationResult:
     fold_metrics_summary: dict = field(default_factory=dict)
     robustness: dict = field(default_factory=dict)
     post_holdout_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    incumbent_champion_version_before_evaluation: str | None = None
 
 
 def evaluate_real_step(
@@ -277,9 +278,18 @@ def evaluate_real_step(
         training_end=last_fold.fold.validation_start - pd.Timedelta(days=1),
         validation_start=last_fold.fold.validation_start, validation_end=last_fold.fold.validation_end,
     )
+
+    # The incumbent MUST be loaded before the challenger is registered --
+    # never after (see champion_challenger_v2.run_promotion_cycle_v2's
+    # docstring for why this ordering is a structural, not just
+    # procedural, guarantee against self-comparison).
+    champion_record = get_champion(con)
     model_version = register_model(con, last_fold.trained, feature_version, periods, metrics, role="CHALLENGER")
 
-    promoted, rationale = run_promotion_cycle_v2(con, model_version, metrics, eval_frame, target_col=PRIMARY_TARGET, pred_col=pred_col)
+    promoted, rationale = run_promotion_cycle_v2(
+        con, model_version, metrics, eval_frame, champion_record,
+        challenger_validation_end=periods.validation_end, target_col=PRIMARY_TARGET, pred_col=pred_col,
+    )
 
     robustness = {}
     if not eval_frame.empty:
@@ -290,6 +300,7 @@ def evaluate_real_step(
         fold_results=fold_results, development_df=development_df, holdout_df=holdout_df, feature_cols=feature_cols,
         champion_model_version=model_version, promoted=promoted, promotion_rationale=rationale,
         fold_metrics_summary=fold_metrics_summary, robustness=robustness, post_holdout_df=post_holdout_df,
+        incumbent_champion_version_before_evaluation=champion_record["model_version"] if champion_record else None,
     )
 
 
